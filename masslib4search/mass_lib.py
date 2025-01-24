@@ -1,8 +1,8 @@
 from __future__ import annotations
 import numpy as np
 import modin.pandas as pd
-import faiss
-import tools
+# import pandas as pd
+from . import tools
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable
 
 class FragLib:
@@ -11,7 +11,7 @@ class FragLib:
 
     def __init__(
         self, 
-        formula: List[str] = None, # list of formulas
+        formula: Union[List[str], pd.Series] = None, # list of formulas
         RT: Optional[List[Optional[float]]] = None, 
         adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
     ):
@@ -20,7 +20,11 @@ class FragLib:
         self.fragments = tools.infer_fragments_table(formula, adducts, RT)
         
     def __len__(self):
-        return len(self.fragments)
+        return len(self.index)
+    
+    @property
+    def index(self):
+        return self.fragments.index
         
     @property
     def formulas(self) -> pd.Series:
@@ -103,17 +107,23 @@ class MolLib:
     ):
         if smiles is None:
             smiles = []
-        formulas = tools.smiles2formula(smiles)
-        self.smiles = np.array(smiles)
+        self.smiles = pd.Series(smiles)
+        formulas = tools.smiles2formulas(self.smiles).dropna()
         self.fragments = FragLib(formulas, RT, adducts)
-        self.embeddings = pd.Series(embeddings)
+        self.smiles = self.smiles[formulas.index]
+        if len(self.embeddings) > 0:
+            self.embeddings = pd.Series(embeddings).apply(lambda x: x[self.fragments.index])
         # self.embeddings: Dict[str, faiss.Index] = {}
         # for name, array in embeddings.items():
         #     self.embeddings[name] = faiss.IndexFlatIP(array.shape[1])
         #     self.embeddings[name].add(array)
         
     def __len__(self):
-        return len(self.smiles)
+        return len(self.index)
+    
+    @property
+    def index(self):
+        return self.smiles.index
         
     @property
     def SMILES(self):
@@ -176,7 +186,7 @@ class MolLib:
             self.mol_embedding(embedding_name),
             mask,top_k,
         )
-        smiles = np.take_along_axis(self.SMILES[np.newaxis,:], index, axis=1)
+        smiles = np.take_along_axis(self.SMILES.values[np.newaxis,:], index, axis=1)
         results = {
             'index': index.tolist(),
             'smiles': smiles.tolist(),
@@ -222,8 +232,15 @@ class SpecLib:
     ):
         self.precursors = tools.infer_precursors_table(PI, RT)
         self.peaks = tools.infer_peaks_table(mzs, intensities)
-        self.mols = MolLib(smiles, mol_RT, mol_adducts, mol_embeddings)
         self.spec_embeddings = pd.Series(spec_embeddings)
+        self.mols = MolLib(smiles, mol_RT, mol_adducts, mol_embeddings)
+        if len(self.MolLib) > 0:
+            if len(self.precursors) > 0:
+                self.precursors = self.precursors.loc[self.MolLib.index]
+            if len(self.peaks) > 0:
+                self.peaks = self.peaks.loc[self.MolLib.index]
+            if len(self.spec_embeddings) > 0:
+                self.spec_embeddings = self.spec_embeddings.apply(lambda x: x[self.MolLib.index])
         
     def __len__(self):
         return max(

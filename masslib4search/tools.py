@@ -1,6 +1,7 @@
 import numpy as np
 import modin.pandas as pd
-from mzinferrer.mz_infer_tools import Fragment
+# import pandas as pd
+from MZInferrer.mzinferrer.mz_infer_tools import Fragment
 import pickle
 import rich.progress
 from rdkit import Chem
@@ -37,26 +38,32 @@ def dict2list(d: Dict[int, Any], max_length: int, padding_value: Any = None) -> 
             re_list.append(padding_value)
     return re_list
 
-def smiles2formula(smiles: List[str]) -> List[str]:
-    smiles: pd.Series = pd.Series(smiles)
-    formulas = smiles.apply(lambda x: rdMolDescriptors.CalcMolFormula(Chem.MolFromSmiles(x)))
-    return formulas.tolist
+def smiles2formula(smiles: str) -> Optional[str]:
+    try:
+        return rdMolDescriptors.CalcMolFormula(Chem.MolFromSmiles(smiles))
+    except:
+        return None
+
+def smiles2formulas(smiles: pd.Series) -> pd.Series:
+    formulas = smiles.apply(lambda x: smiles2formula(x))
+    return formulas
 
 def infer_fragments_table(
-    formula: List[str],
+    formula: Union[List[str],pd.Series],
     adducts: List[str],
     RT: Optional[List[Optional[float]]] = None,
 ) -> pd.DataFrame: # index: formula, columns: adducts, values: exact masses of fragments
-    formulas: pd.Series = pd.Series(formula)
+    if isinstance(formula, list):
+        formula: pd.Series = pd.Series(formula)
     fragments = {"formula":formula}
     for adduct in adducts:
         if adduct == "M":
-            fragments[adduct] = formulas.apply(lambda x: Fragment.from_string(x).ExactMass)
+            fragments[adduct] = formula.apply(lambda x: Fragment.from_string(x).ExactMass)
         else:
-            fragments[adduct] = formulas.apply(lambda x: Fragment.from_string(x + adduct).ExactMass)
+            fragments[adduct] = formula.apply(lambda x: Fragment.from_string(x + adduct).ExactMass)
     if RT is not None:
         RT: pd.Series = pd.Series(RT)
-        fragments['RT'] = RT
+        fragments['RT'] = RT.loc[formula.index]
     fragments = pd.DataFrame(fragments)
     return fragments
 
