@@ -5,7 +5,7 @@ import pickle
 import rich.progress
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
-import faiss
+# import faiss
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
 def to_pickle_bytes(obj) -> bytes:
@@ -116,13 +116,13 @@ def search_fragments(
         return results, bool_matrix
     return results
 
-def search_embeddings_faiss(
-    faiss_index: faiss.Index,
-    embeddings: np.ndarray, # shape: (n_items, n_dim)
-    top_k: int = 1000,
-) -> Tuple[np.ndarray, np.ndarray]:
-    S, I = faiss_index.search(embeddings, k=top_k)
-    return I[0], S[0]
+# def search_embeddings_faiss(
+#     faiss_index: faiss.Index,
+#     embeddings: np.ndarray, # shape: (n_items, n_dim)
+#     top_k: int = 1000,
+# ) -> Tuple[np.ndarray, np.ndarray]:
+#     S, I = faiss_index.search(embeddings, k=top_k)
+#     return I[0], S[0]
 
 def cosine_similarity(
     query_embeddings: np.ndarray, # shape: (n_query_items, n_dim)
