@@ -6,7 +6,7 @@ import rich.progress
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 import faiss
-from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable
+from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
 def to_pickle_bytes(obj) -> bytes:
     return pickle.dumps(obj)
@@ -70,10 +70,10 @@ def search_fragments_to_matrix(
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
 ) -> np.ndarray: # shape: (n_ions, n_fragments, n_adducts)
-    d_maxtrix = np.abs(fragment_MZs.values[np.newaxis,:] - ion_MZs[:,np.newaxis,np.newaxis])
+    d_matrix = np.abs(fragment_MZs.values[np.newaxis,:] - ion_MZs[:,np.newaxis,np.newaxis])
     if mz_tolerance_type == 'ppm':
-        d_maxtrix = d_maxtrix / fragment_MZs.values[np.newaxis,:] * 1e6
-    I_F_D_matrix = d_maxtrix <= mz_tolerance
+        d_matrix = d_matrix / fragment_MZs.values[np.newaxis,:] * 1e6
+    I_F_D_matrix = d_matrix <= mz_tolerance
     if fragment_RTs is not None and ion_RTs is not None:
         d_matrix_RT = np.abs(fragment_RTs.values[np.newaxis,:] - ion_RTs[:,np.newaxis])
         bool_matrix_RT = d_matrix_RT <= RT_tolerance
@@ -94,11 +94,10 @@ def search_fragments(
     ion_RTs: Optional[np.ndarray] = None,
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
-) -> List[
-    Dict[
-        str, # formula
-        str, # adducts
-    ]
+    return_matrix: bool = False,
+) -> Union[
+    List[Dict[str, str]], # List[Dict[formula, adduct]]
+    Tuple[List[Dict[str, str]], np.ndarray],
 ]:
     bool_matrix = search_fragments_to_matrix(
         fragment_MZs, ion_MZs, mz_tolerance, mz_tolerance_type, 
@@ -113,6 +112,8 @@ def search_fragments(
         formula = formulas[formula_index]
         results[ion_index][formula] = fragment_MZs.columns[adduct_index]
     results = dict2list(results, len(ion_MZs), {})
+    if return_matrix:
+        return results, bool_matrix
     return results
 
 def search_embeddings_faiss(
@@ -143,3 +144,74 @@ def search_embeddings_numpy(
     I = np.argsort(-score_matrix, axis=-1)[:, :top_k]
     S = np.take_along_axis(score_matrix, I, axis=1)
     return I, S
+
+def infer_precursors_table(
+    PI: Optional[List[float]] = None,
+    RT: Optional[List[float]] = None,
+) -> pd.DataFrame:
+    df = pd.DataFrame()
+    if PI is not None:
+        df['PI'] = PI
+    if RT is not None:
+        df['RT'] = RT
+    return df
+
+def infer_peaks_table(
+    mzs: Optional[List[List[float]]] = None,
+    intensities: Optional[List[List[float]]] = None,
+) -> pd.DataFrame:
+    df = pd.DataFrame()
+    if mzs is not None:
+        df['mzs'] = mzs
+        df['mzs'] = df['mzs'].apply(lambda x: np.array(x))
+    if intensities is not None:
+        df['intensities'] = intensities
+        df['intensities'] = df['intensities'].apply(lambda x: np.array(x))
+    return df
+    
+def search_precursors_to_matrix(
+    query_precursor_mzs: np.ndarray, # shape: (n_query_precursors,)
+    ref_precursor_mzs: np.ndarray, # shape: (n_ref_precursors,)
+    mz_tolerance: float = 3,
+    mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+    query_precursor_RTs: Optional[np.ndarray] = None,
+    ref_precursor_RTs: Optional[np.ndarray] = None,
+    RT_tolerance: float = 0.1,
+) -> np.ndarray: # shape: (n_query_precursors, n_ref_precursors)
+    d_matrix = np.abs(query_precursor_mzs[np.newaxis,:] - ref_precursor_mzs[:,np.newaxis])
+    if mz_tolerance_type == 'ppm':
+        d_matrix = d_matrix / query_precursor_mzs[np.newaxis,:] * 1e6
+    Q_R_matrix = d_matrix <= mz_tolerance
+    if query_precursor_RTs is not None and ref_precursor_RTs is not None:
+        d_matrix_RT = np.abs(query_precursor_RTs[np.newaxis,:] - ref_precursor_RTs[:,np.newaxis])
+        bool_matrix_RT = d_matrix_RT <= RT_tolerance
+        Q_R_matrix = Q_R_matrix & bool_matrix_RT[:, :, np.newaxis]
+    return Q_R_matrix
+
+def search_precursors(
+    query_precursor_mzs: np.ndarray, # shape: (n_query_precursors,)
+    ref_precursor_mzs: np.ndarray, # shape: (n_ref_precursors,)
+    mz_tolerance: float = 3,
+    mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+    query_precursor_RTs: Optional[np.ndarray] = None,
+    ref_precursor_RTs: Optional[np.ndarray] = None,
+    RT_tolerance: float = 0.1,
+    return_matrix: bool = False,
+) -> Union[
+    List[List[int]], # List[List[ref_precursor_index]]
+    Tuple[List[List[int]], np.ndarray],
+]:
+    bool_matrix = search_precursors_to_matrix(
+        query_precursor_mzs, ref_precursor_mzs, mz_tolerance, mz_tolerance_type, 
+        query_precursor_RTs, ref_precursor_RTs, RT_tolerance,
+    )
+    indices = np.argwhere(bool_matrix)
+    results: Dict[int, List[int]] = {}
+    for query_index, ref_index in indices:
+        if query_index not in results:
+            results[query_index] = []
+        results[query_index].append(ref_index)
+    results = dict2list(results, len(query_precursor_mzs), [])
+    if return_matrix:
+        return results, bool_matrix
+    return results
