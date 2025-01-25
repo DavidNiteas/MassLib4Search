@@ -1,13 +1,18 @@
 import numpy as np
 import modin.pandas as pd
 # import pandas as pd
-from MZInferrer.mzinferrer.mz_infer_tools import Fragment
+# from mzinferrer.mz_infer_tools import Fragment
 import pickle
 import rich.progress
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 # import faiss
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
+
+# dev import
+import sys
+sys.path.append('.')
+from MZInferrer.mzinferrer.mz_infer_tools import Fragment
 
 def to_pickle_bytes(obj) -> bytes:
     return pickle.dumps(obj)
