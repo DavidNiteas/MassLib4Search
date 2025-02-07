@@ -206,14 +206,14 @@ class MolLib:
         return tools.to_pickle_bytes(self)
     
     @classmethod
-    def from_bytes(cls, data: bytes) -> FragLib:
+    def from_bytes(cls, data: bytes) -> MolLib:
         return tools.from_pickle_bytes(data)
     
     def to_pickle(self, path: str):
         tools.save_pickle(self, path)
     
     @classmethod
-    def from_pickle(cls, path: str) -> FragLib:
+    def from_pickle(cls, path: str) -> MolLib:
         return tools.load_pickle(path)
 
 class SpecLib:
@@ -408,6 +408,20 @@ class SpecLib:
                     adduct_list[-1].append(adducts[formula])
             results['adduct'] = adduct_list
         return results
+    
+    def to_bytes(self) -> bytes:
+        return tools.to_pickle_bytes(self)
+    
+    @classmethod
+    def from_bytes(cls, data: bytes) -> SpecLib:
+        return tools.from_pickle_bytes(data)
+    
+    def to_pickle(self, path: str):
+        tools.save_pickle(self, path)
+    
+    @classmethod
+    def from_pickle(cls, path: str) -> SpecLib:
+        return tools.load_pickle(path)
     
 class SpecRuleLib:
     
