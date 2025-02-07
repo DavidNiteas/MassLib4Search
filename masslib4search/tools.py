@@ -45,7 +45,12 @@ def dict2list(d: Dict[int, Any], max_length: int, padding_value: Any = None) -> 
 
 def smiles2formula(smiles: str) -> Optional[str]:
     try:
-        return rdMolDescriptors.CalcMolFormula(Chem.MolFromSmiles(smiles))
+        formula:str = rdMolDescriptors.CalcMolFormula(Chem.MolFromSmiles(smiles))
+        if "+" in formula:
+            return formula.split("+")[0]
+        if "-" in formula:
+            return formula.split("-")[0]
+        return formula
     except:
         return None
 

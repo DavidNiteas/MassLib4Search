@@ -111,7 +111,7 @@ class MolLib:
         formulas = tools.smiles2formulas(self.smiles).dropna()
         self.fragments = FragLib(formulas, RT, adducts)
         self.smiles = self.smiles[formulas.index]
-        if len(self.embeddings) > 0:
+        if len(embeddings) > 0:
             self.embeddings = pd.Series(embeddings).apply(lambda x: x[self.fragments.index])
         # self.embeddings: Dict[str, faiss.Index] = {}
         # for name, array in embeddings.items():
