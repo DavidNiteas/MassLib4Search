@@ -1,6 +1,12 @@
+import dask.bag
+import dask.dataframe
+import dask.delayed
 import numpy as np
-import modin.pandas as pd
-# import pandas as pd
+import modin.pandas as mpd
+import pandas as pd
+import dask
+import dask.array as da
+import dask.dataframe as dd
 # from mzinferrer.mz_infer_tools import Fragment
 import pickle
 import rich.progress
@@ -76,6 +82,41 @@ def infer_fragments_table(
         fragments['RT'] = RT.loc[formula.index]
     fragments = pd.DataFrame(fragments)
     return fragments
+
+def exact_mass_from_formula(formula: str) -> float:
+    return Fragment.from_string(formula).ExactMass
+
+def infer_fragments_table_by_dask(
+    formula: Union[List[str],pd.Series,dd.Series],
+    adducts: List[str],
+    RT: Optional[List[Optional[float]]] = None,
+    npartitions:int = 1,
+) -> dd.DataFrame:
+    if not isinstance(formula, (dd.Series,pd.Series)):
+        formula = pd.Series(formula)
+    if isinstance(formula, pd.Series):
+        formula = dd.from_pandas(formula, npartitions=npartitions)
+    formula: dd.Series
+    formula.name = "formula"
+    fragments: list[dd.Series] = [formula]
+    for adduct in adducts:
+        if adduct == "M":
+            fragment: dd.Series = formula.copy()
+            fragment.name = adduct
+            fragments.append(fragment.apply(exact_mass_from_formula, meta=(adduct, float)))
+        else:
+            fragment: dd.Series = formula + adduct
+            fragment.name = adduct
+            fragments.append(fragment.apply(exact_mass_from_formula, meta=(adduct, float)))
+    if RT is not None:
+        if not isinstance(RT, (dd.Series,pd.Series)):
+            RT = pd.Series(RT)
+        if isinstance(RT, pd.Series):
+            RT = dd.from_pandas(RT, npartitions=npartitions)
+        RT.name = "RT"
+        fragments.append(RT)
+    fragments_df: dd.DataFrame = dd.concat(fragments, axis=1)
+    return fragments_df
 
 def search_fragments_to_matrix(
     fragment_MZs: pd.DataFrame,
