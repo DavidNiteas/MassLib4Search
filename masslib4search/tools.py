@@ -1,12 +1,8 @@
-import dask.bag
-import dask.dataframe
+import dask.bag as db
 import dask.delayed
+from dask import delayed
 import numpy as np
-import modin.pandas as mpd
 import pandas as pd
-import dask
-import dask.array as da
-import dask.dataframe as dd
 # from mzinferrer.mz_infer_tools import Fragment
 import pickle
 import rich.progress
@@ -59,64 +55,6 @@ def smiles2formula(smiles: str) -> Optional[str]:
         return formula
     except:
         return None
-
-def smiles2formulas(smiles: pd.Series) -> pd.Series:
-    formulas = smiles.apply(lambda x: smiles2formula(x))
-    return formulas
-
-def infer_fragments_table(
-    formula: Union[List[str],pd.Series],
-    adducts: List[str],
-    RT: Optional[List[Optional[float]]] = None,
-) -> pd.DataFrame: # index: formula, columns: adducts, values: exact masses of fragments
-    if isinstance(formula, list):
-        formula: pd.Series = pd.Series(formula)
-    fragments = {"formula":formula}
-    for adduct in adducts:
-        if adduct == "M":
-            fragments[adduct] = formula.apply(lambda x: Fragment.from_string(x).ExactMass)
-        else:
-            fragments[adduct] = formula.apply(lambda x: Fragment.from_string(x + adduct).ExactMass)
-    if RT is not None:
-        RT: pd.Series = pd.Series(RT)
-        fragments['RT'] = RT.loc[formula.index]
-    fragments = pd.DataFrame(fragments)
-    return fragments
-
-def exact_mass_from_formula(formula: str) -> float:
-    return Fragment.from_string(formula).ExactMass
-
-def infer_fragments_table_by_dask(
-    formula: Union[List[str],pd.Series,dd.Series],
-    adducts: List[str],
-    RT: Optional[List[Optional[float]]] = None,
-    npartitions:int = 1,
-) -> dd.DataFrame:
-    if not isinstance(formula, (dd.Series,pd.Series)):
-        formula = pd.Series(formula)
-    if isinstance(formula, pd.Series):
-        formula = dd.from_pandas(formula, npartitions=npartitions)
-    formula: dd.Series
-    formula.name = "formula"
-    fragments: list[dd.Series] = [formula]
-    for adduct in adducts:
-        if adduct == "M":
-            fragment: dd.Series = formula.copy()
-            fragment.name = adduct
-            fragments.append(fragment.apply(exact_mass_from_formula, meta=(adduct, float)))
-        else:
-            fragment: dd.Series = formula + adduct
-            fragment.name = adduct
-            fragments.append(fragment.apply(exact_mass_from_formula, meta=(adduct, float)))
-    if RT is not None:
-        if not isinstance(RT, (dd.Series,pd.Series)):
-            RT = pd.Series(RT)
-        if isinstance(RT, pd.Series):
-            RT = dd.from_pandas(RT, npartitions=npartitions)
-        RT.name = "RT"
-        fragments.append(RT)
-    fragments_df: dd.DataFrame = dd.concat(fragments, axis=1)
-    return fragments_df
 
 def search_fragments_to_matrix(
     fragment_MZs: pd.DataFrame,

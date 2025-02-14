@@ -1,46 +1,103 @@
 from __future__ import annotations
+import dask.bag as db
+import dask.array as da
+import dask.delayed
+from dask import delayed
 import numpy as np
 import modin.pandas as pd
 # import pandas as pd
 from . import tools
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable
 
+# dev import
+import sys
+sys.path.append('.')
+from MZInferrer.mzinferrer.mz_infer_tools import Fragment
+
 class FragLib:
     
     non_adduct_columns = frozenset(['formula', 'RT'])
+    
+    @staticmethod
+    def lazy_init(
+        formula: Union[List[str],db.Bag],
+        RT: Optional[List[Optional[float],db.Bag]] = None,
+        adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
+        npartitions: Optional[int] = None,
+    ) -> Dict[
+        str,
+        Union[
+            db.Bag,
+            List[str], # Adducts
+            List[Optional[float]], #RT
+        ]
+    ]:
+        if not isinstance(formula, db.Bag):
+            formula = db.from_sequence(formula,npartitions=npartitions)
+        lazy_dict = {"formula": formula, 'RT': RT}
+        for adduct in adducts:
+            if adduct == "M":
+                lazy_dict[adduct] = formula.map(lambda x: Fragment.from_string(x).ExactMass if x is not None else None)
+            else:
+                lazy_dict[adduct] = formula.map(lambda x: Fragment.from_string(x + adduct).ExactMass if x is not None else None)
+        return lazy_dict
+    
+    def from_lazy(
+        self,
+        **computed_lazy_dict
+    ) -> None:
+        self.fragments = {
+            "formula": computed_lazy_dict["formula"],
+        }
+        for adduct in computed_lazy_dict['adducts']:
+            self.fragments[adduct] = computed_lazy_dict[adduct]
+        self.fragments['RT'] = computed_lazy_dict['RT']
+        self.fragments = pd.DataFrame(self.fragments)
 
     def __init__(
         self, 
-        formula: Union[List[str], pd.Series] = None, # list of formulas
-        RT: Optional[List[Optional[float]]] = None, 
-        adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
+        formula: Union[List[str],db.Bag],
+        RT: Optional[List[Optional[float],db.Bag]] = None,
+        adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
+        scheduler: Optional[str] = None,
+        num_workers: Optional[int] = None,
+        computed_lazy_dict: Optional[dict] = None,
     ):
-        if formula is None:
-            formula = []
-        self.fragments = tools.infer_fragments_table(formula, adducts, RT)
+        if not isinstance(computed_lazy_dict, dict):
+            lazy_dict = self.lazy_init(formula, RT, adducts)
+            (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
+        self.from_lazy(**computed_lazy_dict)
         
     def __len__(self):
         return len(self.index)
     
     @property
     def index(self):
-        return self.fragments.index
-        
-    @property
-    def formulas(self) -> pd.Series:
-        return self.fragments['formula']
+        return self.Fragments.index
     
     @property
-    def adducts(self):
-        return self.fragments.columns[self.fragments.columns.map(lambda x: x not in self.non_adduct_columns)]
+    def Fragments(self) -> pd.DataFrame:
+        return self.fragments
+        
+    @property
+    def Formulas(self) -> pd.Series:
+        return self.Fragments['formula']
+    
+    @property
+    def Adducts(self):
+        return self.Fragments.columns[self.Fragments.columns.map(lambda x: x not in self.non_adduct_columns)]
     
     @property
     def MZs(self):
-        return self.fragments[self.adducts]
+        return self.Fragments[self.Adducts]
     
     @property
     def RTs(self) -> Optional[pd.Series]:
-        return self.fragments.get('RT', None)
+        return self.Fragments.get('RT', None)
+    
+    @property
+    def bad_index(self) -> pd.Index:
+        return self.index[self.Formulas.isna()]
         
     def search_to_matrix(
         self,
@@ -74,7 +131,7 @@ class FragLib:
         Tuple[List[Dict[str, str]], np.ndarray],
     ]:
         results = tools.search_fragments(
-            self.formulas,self.MZs,query_mzs,
+            self.Formulas,self.MZs,query_mzs,
             mz_tolerance,mz_tolerance_type,
             self.RTs,query_RTs,RT_tolerance,
             adduct_co_occurrence_threshold,
@@ -98,55 +155,92 @@ class FragLib:
 
 class MolLib:
     
+    def lazy_init(
+        self,
+        smiles: Union[List[str],db.Bag],
+        RT: Optional[List[Optional[float],db.Bag]] = None,
+        adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
+        embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
+        npartitions: Optional[int] = None,
+    ) -> Dict[
+        str,
+        Union[
+            db.Bag,
+            List[str], # Adducts
+            List[Optional[float]], #RT
+        ]
+    ]:
+        if not isinstance(smiles, db.Bag):
+            smiles = db.from_sequence(smiles,npartitions=npartitions)
+        formulas = smiles.map(lambda x: tools.smiles2formula(x))
+        frag_lib_lazy_dict = FragLib.lazy_init(formulas, RT, adducts, npartitions)
+        return {
+            'smiles': smiles,
+            'embeddings': embeddings,
+            'fragments': frag_lib_lazy_dict,
+        }
+        
+    def from_lazy(
+        self,
+        **computed_lazy_dict
+    ) -> None:
+        self.smiles = pd.Series(computed_lazy_dict['smiles'])
+        self.fragments = FragLib(computed_lazy_dict=computed_lazy_dict['fragments'])
+        self.embeddings = pd.Series(computed_lazy_dict['embeddings'])
+    
     def __init__(
         self,
-        smiles: List[str] = None, # list of SMILES strings
-        RT: Optional[List[Optional[float]]] = None,
+        smiles: Union[List[str],db.Bag],
+        RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
-        embeddings: Dict[str, np.ndarray] = {}, # dict of embedding arrays, keyed by embedding name
+        embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
+        scheduler: Optional[str] = None,
+        num_workers: Optional[int] = None,
+        computed_lazy_dict: Optional[dict] = None,
     ):
-        if smiles is None:
-            smiles = []
-        self.smiles = pd.Series(smiles)
-        formulas = tools.smiles2formulas(self.smiles).dropna()
-        self.fragments = FragLib(formulas, RT, adducts)
-        self.smiles = self.smiles[formulas.index]
-        if len(embeddings) > 0:
-            self.embeddings = pd.Series(embeddings).apply(lambda x: x[self.fragments.index])
-        # self.embeddings: Dict[str, faiss.Index] = {}
-        # for name, array in embeddings.items():
-        #     self.embeddings[name] = faiss.IndexFlatIP(array.shape[1])
-        #     self.embeddings[name].add(array)
+        if not isinstance(computed_lazy_dict, dict):
+            lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings)
+            (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
+        self.from_lazy(**computed_lazy_dict)
         
     def __len__(self):
         return len(self.index)
     
     @property
     def index(self):
-        return self.smiles.index
+        return self.SMILES.index
         
     @property
     def SMILES(self):
         return self.smiles
-        
-    @property
-    def formulas(self):
-        return self.fragments.formulas
     
     @property
-    def adducts(self):
-        return self.fragments.adducts
+    def FragmentLib(self) -> FragLib:
+        return self.fragments
+    
+    @property
+    def Fragments(self) -> pd.DataFrame:
+        return self.FragmentLib.Fragments
+        
+    @property
+    def Formulas(self):
+        return self.FragmentLib.Formulas
+    
+    @property
+    def Adducts(self):
+        return self.FragmentLib.Adducts
     
     @property
     def MZs(self):
-        return self.fragments.MZs
+        return self.FragmentLib.MZs
     
     @property
     def RTs(self):
-        return self.fragments.RTs
+        return self.FragmentLib.RTs
     
-    # def mol_embedding(self, embedding_name: str) -> Optional[faiss.Index]:
-    #     return self.embeddings.get(embedding_name, None)
+    @property
+    def bad_index(self) -> pd.Index:
+        return self.FragmentLib.bad_index
     
     def mol_embedding(self, embedding_name: str) -> Optional[np.ndarray]:
         return self.embeddings.get(embedding_name, None)
@@ -194,7 +288,7 @@ class MolLib:
         }
         if adduct_map is not None:
             adduct_list: List[List[str]] = []
-            formula_array = np.take_along_axis(self.fragments.formulas.values[np.newaxis,:], index, axis=1)
+            formula_array = np.take_along_axis(self.Formulas.values[np.newaxis,:], index, axis=1)
             for formulas,adducts in zip(formula_array,adduct_map):
                 adduct_list.append([])
                 for formula in formulas:
