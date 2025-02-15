@@ -23,7 +23,7 @@ class FragLib:
         adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
         npartitions: Optional[int] = None,
     ) -> Dict[
-        Literal['formula', 'RT', 'adducts'],
+        Union[Literal['formula', 'RT', 'adducts'],str],
         Union[
             db.Bag,
             List[str], # Adducts
@@ -161,7 +161,7 @@ class MolLib:
     def lazy_init(
         smiles: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
-        adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
+        adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
         npartitions: Optional[int] = None,
     ) -> Dict[
