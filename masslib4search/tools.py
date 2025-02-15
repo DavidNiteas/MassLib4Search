@@ -8,7 +8,6 @@ import pickle
 import rich.progress
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
-# import faiss
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
 # dev import
@@ -159,10 +158,8 @@ def infer_peaks_table(
     df = pd.DataFrame()
     if mzs is not None:
         df['mzs'] = mzs
-        df['mzs'] = df['mzs'].apply(lambda x: np.array(x))
     if intensities is not None:
         df['intensities'] = intensities
-        df['intensities'] = df['intensities'].apply(lambda x: np.array(x))
     return df
     
 def search_precursors_to_matrix(

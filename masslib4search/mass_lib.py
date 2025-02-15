@@ -1,11 +1,9 @@
 from __future__ import annotations
+import dask
 import dask.bag as db
 import dask.array as da
-import dask.delayed
-from dask import delayed
 import numpy as np
-import modin.pandas as pd
-# import pandas as pd
+import pandas as pd
 from . import tools
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable
 
@@ -25,7 +23,7 @@ class FragLib:
         adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
         npartitions: Optional[int] = None,
     ) -> Dict[
-        str,
+        Literal['formula', 'RT', 'adducts'],
         Union[
             db.Bag,
             List[str], # Adducts
@@ -34,12 +32,14 @@ class FragLib:
     ]:
         if not isinstance(formula, db.Bag):
             formula = db.from_sequence(formula,npartitions=npartitions)
-        lazy_dict = {"formula": formula, 'RT': RT}
+        lazy_dict = {"formula": formula, 'adducts': adducts}
         for adduct in adducts:
             if adduct == "M":
                 lazy_dict[adduct] = formula.map(lambda x: Fragment.from_string(x).ExactMass if x is not None else None)
             else:
                 lazy_dict[adduct] = formula.map(lambda x: Fragment.from_string(x + adduct).ExactMass if x is not None else None)
+        if RT is not None:
+            lazy_dict['RT'] = RT
         return lazy_dict
     
     def from_lazy(
@@ -51,22 +51,24 @@ class FragLib:
         }
         for adduct in computed_lazy_dict['adducts']:
             self.fragments[adduct] = computed_lazy_dict[adduct]
-        self.fragments['RT'] = computed_lazy_dict['RT']
+        if 'RT' in computed_lazy_dict:
+            self.fragments['RT'] = computed_lazy_dict['RT']
         self.fragments = pd.DataFrame(self.fragments)
 
     def __init__(
         self, 
-        formula: Union[List[str],db.Bag],
+        formula: Union[List[str],db.Bag,None] = None,
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
-        if not isinstance(computed_lazy_dict, dict):
-            lazy_dict = self.lazy_init(formula, RT, adducts)
-            (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
-        self.from_lazy(**computed_lazy_dict)
+        if formula is not None or computed_lazy_dict is not None:
+            if not isinstance(computed_lazy_dict, dict):
+                lazy_dict = self.lazy_init(formula, RT, adducts)
+                (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
+            self.from_lazy(**computed_lazy_dict)
         
     def __len__(self):
         return len(self.index)
@@ -155,15 +157,15 @@ class FragLib:
 
 class MolLib:
     
+    @staticmethod
     def lazy_init(
-        self,
         smiles: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
         npartitions: Optional[int] = None,
     ) -> Dict[
-        str,
+        Literal['smiles', 'embeddings', 'fragments'],
         Union[
             db.Bag,
             List[str], # Adducts
@@ -190,7 +192,7 @@ class MolLib:
     
     def __init__(
         self,
-        smiles: Union[List[str],db.Bag],
+        smiles: Union[List[str],db.Bag,None] = None,
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
@@ -198,10 +200,11 @@ class MolLib:
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
-        if not isinstance(computed_lazy_dict, dict):
-            lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings)
-            (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
-        self.from_lazy(**computed_lazy_dict)
+        if smiles is not None or computed_lazy_dict is not None:
+            if not isinstance(computed_lazy_dict, dict):
+                lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings)
+                (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
+            self.from_lazy(**computed_lazy_dict)
         
     def __len__(self):
         return len(self.index)
@@ -312,6 +315,54 @@ class MolLib:
 
 class SpecLib:
     
+    @staticmethod
+    def lazy_init(
+        PI: Union[List[float],db.Bag,None] = None,
+        RT: Union[List[float],db.Bag,None] = None,
+        mzs: Union[List[List[float]],db.Bag,None] = None,
+        intensities: Union[List[List[float]],db.Bag,None] = None,
+        spec_embeddings: Dict[str, Union[np.ndarray,da.Array]] = {},
+        smiles: Union[List[str],db.Bag,None] = None,
+        mol_RT: Union[List[Optional[float]],db.Bag,None] = None,
+        mol_adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
+        mol_embeddings: Dict[str, Union[np.ndarray,da.Array]] = {},
+        npartitions: Optional[int] = None,
+    ) -> Dict[
+        Literal['PI', 'RT','mzs', 'intensities','spec_embeddings','mol_lib'],
+        Union[
+            db.Bag,
+            List[float], # PI, RT
+            List[List[float]], # mzs, intensities
+            dict, # spec_embeddings, mol_lib_lazy_dict
+        ]
+    ]:
+        if mzs is not None and not isinstance(mzs, db.Bag):
+            mzs = db.from_sequence(mzs,npartitions=npartitions)
+        if intensities is not None and not isinstance(intensities, db.Bag):
+            intensities = db.from_sequence(intensities,npartitions=npartitions)
+        if isinstance(mzs, db.Bag):
+            mzs = mzs.map(lambda x: np.array(x))
+        if isinstance(intensities, db.Bag):
+            intensities = intensities.map(lambda x: np.array(x))
+        mol_lib_lazy_dict = MolLib.lazy_init(smiles, mol_RT, mol_adducts, mol_embeddings, npartitions)
+        return {
+            'PI': PI,
+            'RT': RT,
+            'mzs': mzs,
+            'intensities': intensities,
+            'spec_embeddings': spec_embeddings,
+            'mol_lib': mol_lib_lazy_dict,
+        }
+        
+    def from_lazy(
+        self,
+        **computed_lazy_dict
+    ) -> None:
+        self.precursors = tools.infer_precursors_table(computed_lazy_dict['PI'], computed_lazy_dict['RT'])
+        self.peaks = tools.infer_peaks_table(computed_lazy_dict['mzs'], computed_lazy_dict['intensities'])
+        self.spec_embeddings = pd.Series(computed_lazy_dict['spec_embeddings'])
+        self.mols = MolLib(computed_lazy_dict=computed_lazy_dict['mol_lib'])
+    
     def __init__(
         self,
         PI: Optional[List[float]] = None,
@@ -323,18 +374,14 @@ class SpecLib:
         mol_RT: Optional[List[Optional[float]]] = None,
         mol_adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'], # list of adducts for each SMILES string
         mol_embeddings: Dict[str, np.ndarray] = {}, # dict of embedding arrays, keyed by embedding name
+        scheduler: Optional[str] = None,
+        num_workers: Optional[int] = None,
+        computed_lazy_dict: Optional[dict] = None,
     ):
-        self.precursors = tools.infer_precursors_table(PI, RT)
-        self.peaks = tools.infer_peaks_table(mzs, intensities)
-        self.spec_embeddings = pd.Series(spec_embeddings)
-        self.mols = MolLib(smiles, mol_RT, mol_adducts, mol_embeddings)
-        if len(self.MolLib) > 0:
-            if len(self.precursors) > 0:
-                self.precursors = self.precursors.loc[self.MolLib.index]
-            if len(self.peaks) > 0:
-                self.peaks = self.peaks.loc[self.MolLib.index]
-            if len(self.spec_embeddings) > 0:
-                self.spec_embeddings = self.spec_embeddings.apply(lambda x: x[self.MolLib.index])
+        if not isinstance(computed_lazy_dict,dict):
+            lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings)
+            (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
+        self.from_lazy(**computed_lazy_dict)
         
     def __len__(self):
         return max(
@@ -378,7 +425,7 @@ class SpecLib:
     
     @property
     def mol_adducts(self):
-        return self.MolLib.adducts
+        return self.MolLib.Adducts
     
     @property
     def mol_MZs(self):
@@ -390,7 +437,7 @@ class SpecLib:
     
     @property
     def mol_formulas(self):
-        return self.MolLib.formulas
+        return self.MolLib.Formulas
     
     def spec_embedding(self, embedding_name: str) -> Optional[np.ndarray]:
         return self.spec_embeddings.get(embedding_name, None)
@@ -495,7 +542,7 @@ class SpecLib:
         }
         if adduct_map is not None:
             adduct_list: List[List[str]] = []
-            formula_array = np.take_along_axis(self.MolLib.fragments.formulas.values[np.newaxis,:], index, axis=1)
+            formula_array = np.take_along_axis(self.MolLib.Formulas.values[np.newaxis,:], index, axis=1)
             for formulas,adducts in zip(formula_array,adduct_map):
                 adduct_list.append([])
                 for formula in formulas:
