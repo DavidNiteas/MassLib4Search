@@ -13,7 +13,7 @@ from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, H
 # dev import
 import sys
 sys.path.append('.')
-from MZInferrer.mzinferrer.mz_infer_tools import Fragment
+from MZInferrer.mzinferrer.mz_infer_tools import Fragment,Adduct
 
 def to_pickle_bytes(obj) -> bytes:
     return pickle.dumps(obj)
@@ -54,6 +54,11 @@ def smiles2formula(smiles: str) -> Optional[str]:
         return formula
     except:
         return None
+    
+def predict_adduct_mz(adduct: Adduct, mass: Union[float, None]) -> Union[float, None]:
+    if mass is None:
+        return None
+    return adduct.predict_mz(mass)
 
 def search_fragments_to_matrix(
     fragment_MZs: pd.DataFrame,

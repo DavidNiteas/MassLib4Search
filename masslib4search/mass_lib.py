@@ -2,6 +2,8 @@ from __future__ import annotations
 import dask
 import dask.bag as db
 import dask.array as da
+import dask.dataframe as dd
+from functools import partial
 import numpy as np
 import pandas as pd
 from . import tools
@@ -10,17 +12,19 @@ from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, H
 # dev import
 import sys
 sys.path.append('.')
-from MZInferrer.mzinferrer.mz_infer_tools import Fragment
+from MZInferrer.mzinferrer.mz_infer_tools import Fragment,Adduct
 
 class FragLib:
     
     non_adduct_columns = frozenset(['formula', 'RT'])
+    defualt_positive_adducts = ['[M]','[M+H]+', '[M+NH4]+', '[M+Na]+', '[M+K]+']
+    defualt_negative_adducts = ['[M]', '[M-H]-', '[M+COOH]-', '[M+CH3COO]-']
     
     @staticmethod
     def lazy_init(
         formula: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
-        adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
+        adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         npartitions: Optional[int] = None,
     ) -> Dict[
         Union[Literal['formula', 'RT', 'adducts'],str],
@@ -32,12 +36,20 @@ class FragLib:
     ]:
         if not isinstance(formula, db.Bag):
             formula = db.from_sequence(formula,npartitions=npartitions)
+            
+        if adducts == 'pos':
+            adducts:List[Adduct] = [Adduct.from_adduct_string(adduct_string) for adduct_string in FragLib.defualt_positive_adducts]
+        elif adducts == 'neg':
+            adducts:List[Adduct] = [Adduct.from_adduct_string(adduct_string) for adduct_string in FragLib.defualt_negative_adducts]
+        else:
+            adducts:List[Adduct] = [Adduct.from_adduct_string(adduct_string) for adduct_string in adducts]
+            
+        exact_masses = formula.map(lambda x: Fragment.from_formula_string(x).ExactMass if x is not None else None)
+            
         lazy_dict = {"formula": formula, 'adducts': adducts}
         for adduct in adducts:
-            if adduct == "M":
-                lazy_dict[adduct] = formula.map(lambda x: Fragment.from_string(x).ExactMass if x is not None else None)
-            else:
-                lazy_dict[adduct] = formula.map(lambda x: Fragment.from_string(x + adduct).ExactMass if x is not None else None)
+            predict_mz_func = partial(tools.predict_adduct_mz, adduct)
+            lazy_dict[str(adduct)] = exact_masses.map(predict_mz_func)
         if RT is not None:
             lazy_dict['RT'] = RT
         return lazy_dict
@@ -50,7 +62,9 @@ class FragLib:
             "formula": computed_lazy_dict["formula"],
         }
         for adduct in computed_lazy_dict['adducts']:
-            self.fragments[adduct] = computed_lazy_dict[adduct]
+            adduct: Adduct
+            adduct_string = str(adduct)
+            self.fragments[adduct_string] = computed_lazy_dict[adduct_string]
         if 'RT' in computed_lazy_dict:
             self.fragments['RT'] = computed_lazy_dict['RT']
         self.fragments = pd.DataFrame(self.fragments)
@@ -59,7 +73,7 @@ class FragLib:
         self, 
         formula: Union[List[str],db.Bag,None] = None,
         RT: Optional[List[Optional[float],db.Bag]] = None,
-        adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
+        adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
@@ -161,7 +175,7 @@ class MolLib:
     def lazy_init(
         smiles: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
-        adducts: List[str] = ['M','H+', 'NH4+', 'Na+', 'K+'],
+        adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
         npartitions: Optional[int] = None,
     ) -> Dict[
@@ -194,7 +208,7 @@ class MolLib:
         self,
         smiles: Union[List[str],db.Bag,None] = None,
         RT: Optional[List[Optional[float],db.Bag]] = None,
-        adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
+        adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
@@ -324,7 +338,7 @@ class SpecLib:
         spec_embeddings: Dict[str, Union[np.ndarray,da.Array]] = {},
         smiles: Union[List[str],db.Bag,None] = None,
         mol_RT: Union[List[Optional[float]],db.Bag,None] = None,
-        mol_adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'],
+        mol_adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         mol_embeddings: Dict[str, Union[np.ndarray,da.Array]] = {},
         npartitions: Optional[int] = None,
     ) -> Dict[
@@ -372,7 +386,7 @@ class SpecLib:
         spec_embeddings: Dict[str, np.ndarray] = {}, # dict of embedding arrays, keyed by embedding name
         smiles: List[str] = None, # list of SMILES strings
         mol_RT: Optional[List[Optional[float]]] = None,
-        mol_adducts: List[str] = ['H+', 'NH4+', 'Na+', 'K+'], # list of adducts for each SMILES string
+        mol_adducts: Union[List[str],Literal['pos','neg']] = 'pos', # list of adducts for each SMILES string
         mol_embeddings: Dict[str, np.ndarray] = {}, # dict of embedding arrays, keyed by embedding name
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
