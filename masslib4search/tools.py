@@ -2,6 +2,8 @@ import dask
 import dask.bag as db
 import dask.dataframe as dd
 import dask.array as da
+from dask import delayed
+from dask.delayed import Delayed
 import numpy as np
 import pandas as pd
 # from mzinferrer.mz_infer_tools import Fragment
@@ -122,6 +124,21 @@ def search_fragments_to_matrix(
     
     return I_F_D_matrix
 
+def decode_matrix_to_fragments(
+    formulas: pd.Series,
+    ref_fragment_table: pd.DataFrame, # shape: (n_fragments, n_adducts), columns: adducts
+    query_ions: np.ndarray, # shape: (n_ions,)
+    indices: np.ndarray, # shape: (ion_index, formula_index, adduct_index)
+) -> List[Dict[str, str]]: # List[Dict[formula, adduct]]
+    results: Dict[int, Dict[str, str]] = {}
+    for ion_index, formula_index, adduct_index in indices:
+        if ion_index not in results:
+            results[ion_index] = {}
+        formula = formulas[formula_index]
+        results[ion_index][formula] = ref_fragment_table.columns[adduct_index]
+    results = dict2list(results, len(query_ions), {})
+    return results
+
 def search_fragments(
     formulas: pd.Series,
     ref_fragment_table: Union[pd.DataFrame,dd.DataFrame], # shape: (n_fragments, n_adducts), columns: adducts
@@ -168,13 +185,7 @@ def search_fragments(
     bool_matrix, indices, ref_fragment_table, query_ions = dask.compute(bool_matrix, indices, ref_fragment_table, query_ions)
     
     # decode results
-    results: Dict[int, Dict[str, str]] = {}
-    for ion_index, formula_index, adduct_index in indices:
-        if ion_index not in results:
-            results[ion_index] = {}
-        formula = formulas[formula_index]
-        results[ion_index][formula] = ref_fragment_table.columns[adduct_index]
-    results = dict2list(results, len(query_ions), {})
+    results = decode_matrix_to_fragments(formulas, ref_fragment_table, query_ions, indices)
     if return_matrix:
         return results, bool_matrix
     return results
@@ -188,25 +199,53 @@ def search_fragments(
 #     return I[0], S[0]
 
 def cosine_similarity(
-    query_embeddings: np.ndarray, # shape: (n_query_items, n_dim)
-    ref_embeddings: np.ndarray, # shape: (n_ref_items, n_dim)
-) -> np.ndarray: # shape: (n_query_items, n_ref_items)
-    score_matrix = np.dot(query_embeddings, ref_embeddings.T)
-    score_matrix = score_matrix / (np.linalg.norm(query_embeddings, axis=1, keepdims=True) * np.linalg.norm(ref_embeddings, axis=1, keepdims=True).T)
+    query_embeddings: Union[da.Array, np.ndarray], # shape: (n_query_items, n_dim)
+    ref_embeddings: Union[da.Array, np.ndarray], # shape: (n_ref_items, n_dim)
+) -> da.Array: # shape: (n_query_items, n_ref_items)
+    query_embeddings = da.asarray(query_embeddings)
+    ref_embeddings = da.asarray(ref_embeddings)
+    dot_product = da.dot(query_embeddings, ref_embeddings.T)
+    norm_query = da.linalg.norm(query_embeddings, axis=1, keepdims=True)
+    norm_ref = da.linalg.norm(ref_embeddings, axis=1, keepdims=True)
+    score_matrix = dot_product / (norm_query * norm_ref.T)
     return score_matrix
 
-def search_embeddings_numpy(
-    query_embeddings: np.ndarray, # shape: (n_query_items, n_dim)
-    ref_embeddings: np.ndarray, # shape: (n_ref_items, n_dim)
-    mask: Optional[np.ndarray] = None, # shape: (n_query_items,n_ref_items)
-    top_k: int = 20,
-) -> Tuple[np.ndarray, np.ndarray]:
+def infer_I_S_from_score_matrix(
+    score_matrix: Union[da.Array, np.ndarray], # shape: (n_query_items, n_ref_items)
+    top_k: int,
+    ) -> Tuple[da.Array, da.Array]: # shape: (n_query_items, top_k), (n_query_items, top_k)
+    score_matrix = da.asarray(score_matrix)
+    I = da.argtopk(-score_matrix, top_k, axis=-1)
+    S = []
+    for i in range(len(score_matrix)):
+        S.append(da.take(score_matrix[i], I[i]))
+    S = da.stack(S,axis=0)
+    return I, S
+
+def search_embeddings(
+    query_embeddings: Union[da.Array, np.ndarray], # shape: (n_query_items, n_dim)
+    ref_embeddings: Union[da.Array, np.ndarray], # shape: (n_ref_items, n_dim)
+    mask: Optional[Union[da.Array, np.ndarray]] = None, # shape: (n_query_items,n_ref_items)
+    top_k: Optional[int] = None,
+    return_no_mask: bool = False,
+) -> Union[
+    Tuple[da.Array, da.Array],
+    Tuple[da.Array, da.Array, da.Array, da.Array], # if return_no_mask is True
+]:
+    if top_k is None:
+        top_k = len(ref_embeddings)
     score_matrix = cosine_similarity(query_embeddings, ref_embeddings)
     if mask is not None:
-        score_matrix = score_matrix * mask
-    I = np.argsort(-score_matrix, axis=-1)[:, :top_k]
-    S = np.take_along_axis(score_matrix, I, axis=1)
-    return I, S
+        mask = da.asarray(mask)
+        masked_score_matrix = score_matrix * mask
+    else:
+        masked_score_matrix = score_matrix
+    I, S = infer_I_S_from_score_matrix(masked_score_matrix, top_k)
+    if return_no_mask:
+        I_no_mask, S_no_mask = infer_I_S_from_score_matrix(score_matrix, top_k)
+        return I, S, I_no_mask, S_no_mask
+    else:
+        return I, S
 
 def infer_precursors_table(
     PI: Optional[List[float]] = None,
@@ -231,31 +270,61 @@ def infer_peaks_table(
     return df
     
 def search_precursors_to_matrix(
-    query_precursor_mzs: np.ndarray, # shape: (n_query_precursors,)
-    ref_precursor_mzs: np.ndarray, # shape: (n_ref_precursors,)
+    query_precursor_mzs: Union[da.Array, np.ndarray], # shape: (n_query_precursors,)
+    ref_precursor_mzs: Union[da.Array, np.ndarray], # shape: (n_ref_precursors,)
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    query_precursor_RTs: Optional[np.ndarray] = None,
-    ref_precursor_RTs: Optional[np.ndarray] = None,
+    query_precursor_RTs: Optional[Union[da.Array, np.ndarray]] = None,
+    ref_precursor_RTs: Optional[Union[da.Array, np.ndarray]] = None,
     RT_tolerance: float = 0.1,
-) -> np.ndarray: # shape: (n_query_precursors, n_ref_precursors)
-    d_matrix = np.abs(query_precursor_mzs[np.newaxis,:] - ref_precursor_mzs[:,np.newaxis])
+) -> da.Array: # shape: (n_query_precursors, n_ref_precursors)
+    
+    # convert to dask arrays
+    query_precursor_mzs = da.asarray(query_precursor_mzs)
+    ref_precursor_mzs = da.asarray(ref_precursor_mzs)
+    
+    # calculate mass difference matrix
+    d_matrix = da.abs(query_precursor_mzs[:, None] - ref_precursor_mzs[None,:])
+    
+    # convert ppm tolerance to Da tolerance
     if mz_tolerance_type == 'ppm':
-        d_matrix = d_matrix / query_precursor_mzs[np.newaxis,:] * 1e6
+        d_matrix = d_matrix / query_precursor_mzs[None,:] * 1e6
+    
+    # generate boolean matrix
     Q_R_matrix = d_matrix <= mz_tolerance
+    
+    # handle RT condition
     if query_precursor_RTs is not None and ref_precursor_RTs is not None:
-        d_matrix_RT = np.abs(query_precursor_RTs[np.newaxis,:] - ref_precursor_RTs[:,np.newaxis])
+        # convert to dask arrays
+        query_precursor_RTs = da.asarray(query_precursor_RTs)
+        ref_precursor_RTs = da.asarray(ref_precursor_RTs)
+        # calculate RT difference matrix
+        d_matrix_RT = da.abs(query_precursor_RTs[:, None] - ref_precursor_RTs[None, :])
         bool_matrix_RT = d_matrix_RT <= RT_tolerance
-        Q_R_matrix = Q_R_matrix & bool_matrix_RT[:, :, np.newaxis]
+        # combine RT condition with mz condition
+        Q_R_matrix = Q_R_matrix & bool_matrix_RT
+    
     return Q_R_matrix
 
+def decode_precursors_matrix_to_index(
+    query_lens: int,
+    indices: np.ndarray, # shape: (query_index, ref_index)
+) -> List[List[int]]: # List[List[ref_precursor_index]]
+    results: Dict[int, List[int]] = {}
+    for query_index, ref_index in indices:
+        if query_index not in results:
+            results[query_index] = []
+        results[query_index].append(ref_index)
+    results = dict2list(results, query_lens, [])
+    return results
+
 def search_precursors(
-    query_precursor_mzs: np.ndarray, # shape: (n_query_precursors,)
-    ref_precursor_mzs: np.ndarray, # shape: (n_ref_precursors,)
+    query_precursor_mzs: Union[da.Array, np.ndarray], # shape: (n_query_precursors,)
+    ref_precursor_mzs: Union[da.Array, np.ndarray], # shape: (n_ref_precursors,)
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    query_precursor_RTs: Optional[np.ndarray] = None,
-    ref_precursor_RTs: Optional[np.ndarray] = None,
+    query_precursor_RTs: Optional[Union[da.Array, np.ndarray]] = None,
+    ref_precursor_RTs: Optional[Union[da.Array, np.ndarray]] = None,
     RT_tolerance: float = 0.1,
     return_matrix: bool = False,
 ) -> Union[
@@ -266,13 +335,12 @@ def search_precursors(
         query_precursor_mzs, ref_precursor_mzs, mz_tolerance, mz_tolerance_type, 
         query_precursor_RTs, ref_precursor_RTs, RT_tolerance,
     )
-    indices = np.argwhere(bool_matrix)
-    results: Dict[int, List[int]] = {}
-    for query_index, ref_index in indices:
-        if query_index not in results:
-            results[query_index] = []
-        results[query_index].append(ref_index)
-    results = dict2list(results, len(query_precursor_mzs), [])
+    indices = da.argwhere(bool_matrix)
     if return_matrix:
+        (indices,bool_matrix) = dask.compute(indices,bool_matrix)
+        results =  decode_precursors_matrix_to_index(indices)
         return results, bool_matrix
-    return results
+    else:
+        (indices,) = dask.compute(indices)
+        results = decode_precursors_matrix_to_index(indices)
+        return results

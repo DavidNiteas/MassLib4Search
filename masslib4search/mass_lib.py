@@ -165,7 +165,7 @@ class FragLib:
             adduct_co_occurrence_threshold: Minimum number of required adduct co-occurrences (加合物共现的最小数量阈值)
         
         Returns:
-            da.Array: Boolean matrix (n_queries, n_formulas) indicating formula presence (二维命中矩阵)
+            da.Array: Boolean matrix (n_queries, n_formulas, n_adducts) indicating formula presence (三维命中矩阵)
             
         Note:
             This function is a lazy operation, it will not compute anything until you call dask.compute on the result.
@@ -183,7 +183,6 @@ class FragLib:
             self.RTs,query_RTs,RT_tolerance,
             adduct_co_occurrence_threshold,
         )
-        results = results.sum(axis=-1) > 0
         return results
         
     def search(
@@ -348,11 +347,12 @@ class MolLib:
     def search(
         self,
         embedding_name: str,
-        query_embedding: np.ndarray, # shape: (n_queries, embedding_dim)
-        query_mzs: Optional[np.ndarray] = None, # shape: (n_ions,)
+        query_embedding: Union[np.ndarray,da.Array], # shape: (n_queries, embedding_dim)
+        query_mzs: Union[np.ndarray,da.Array,None] = None, # shape: (n_ions,)
+        adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
         mz_tolerance: float = 3,
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Optional[np.ndarray] = None,
+        query_RTs: Union[np.ndarray,da.Array,None] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
@@ -367,33 +367,58 @@ class MolLib:
         mask = None
         adduct_map = None
         if query_mzs is not None:
-            adduct_map,matrix = self.fragments.search(
-                query_mzs,mz_tolerance,mz_tolerance_type,
+            bool_matrix = self.FragmentLib.search_to_matrix(
+                query_mzs,adducts,
+                mz_tolerance,mz_tolerance_type,
                 query_RTs,RT_tolerance,
                 adduct_co_occurrence_threshold,
-                return_matrix=True,
             )
-            mask = matrix.sum(axis=-1) > 0
-            
-        index,scores = tools.search_embeddings_numpy(
+            mask = da.sum(bool_matrix, axis=-1) > 0
+            indices = da.argwhere(bool_matrix)
+
+        ref_embedding = self.mol_embedding(embedding_name)
+        if ref_embedding is None:
+            raise ValueError(f"No embedding named {embedding_name} found in MolLib")
+        
+        index,scores = tools.search_embeddings(
             query_embedding,
-            self.mol_embedding(embedding_name),
+            ref_embedding,
             mask,top_k,
         )
-        smiles = np.take_along_axis(self.SMILES.values[np.newaxis,:], index, axis=1)
-        results = {
-            'index': index.tolist(),
-            'smiles': smiles.tolist(),
-            'score': scores.tolist(),
+        
+        da_smiles = da.asarray(self.SMILES.values,chunks=len(self.SMILES))
+        da_formula = da.asarray(self.Formulas.values,chunks=len(self.Formulas))
+        smiles = []
+        formula_array = []
+        for i in range(len(index)):
+            smiles.append(da.take(da_smiles, index[i]))
+            formula_array.append(da.take(da_formula, index[i]))
+        smiles = da.stack(smiles,axis=0)
+        formula_array = da.stack(formula_array,axis=0)
+        
+        results:Dict[str,np.ndarray] = {
+            'index': index,
+            'smiles': smiles,
+            'score': scores,
         }
-        if adduct_map is not None:
+        
+        if query_mzs is not None:
+            results,indices,formula_array = dask.compute(results,indices,formula_array)
+            adduct_map = tools.decode_matrix_to_fragments(
+                self.Formulas,self.FragmentLib.get_MZs_by_adducts(adducts),
+                query_mzs,indices,
+            )
             adduct_list: List[List[str]] = []
-            formula_array = np.take_along_axis(self.Formulas.values[np.newaxis,:], index, axis=1)
             for formulas,adducts in zip(formula_array,adduct_map):
                 adduct_list.append([])
                 for formula in formulas:
                     adduct_list[-1].append(adducts[formula])
             results['adduct'] = adduct_list
+        else:
+            (results,) = dask.compute(results)
+        for key,value in results.items():
+            if isinstance(value, np.ndarray):
+                results[key] = value.tolist()
         return results
     
     def to_bytes(self) -> bytes:
@@ -517,6 +542,10 @@ class SpecLib:
         return self.mols
     
     @property
+    def FragmentLib(self) -> FragLib:
+        return self.MolLib.FragmentLib
+    
+    @property
     def mol_smiles(self) -> pd.Series:
         return self.MolLib.SMILES
     
@@ -544,12 +573,12 @@ class SpecLib:
     
     def search_precursors_to_matrix(
         self,
-        query_precursor_mzs: np.ndarray, # shape: (n_queries,)
-        precursor_mz_tolerance: float = 10,
+        query_precursor_mzs: Union[da.Array, np.ndarray], # shape: (n_queries,)
+        precursor_mz_tolerance: float = 5,
         precursor_mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_precursor_RTs: Optional[np.ndarray] = None,
+        query_precursor_RTs: Optional[Union[da.Array, np.ndarray]] = None,
         precursor_RT_tolerance: float = 0.1,
-    ) -> np.ndarray: # shape: (n_queries, n_formulas), dtype: bool
+    ) -> da.Array: # shape: (n_queries, n_formulas), dtype: bool
         results = tools.search_precursors_to_matrix(
             query_precursor_mzs,
             self.precursor_mzs.values,
@@ -563,10 +592,10 @@ class SpecLib:
     
     def search_precursors(
         self,
-        query_precursor_mzs: np.ndarray, # shape: (n_queries,)
+        query_precursor_mzs: Union[da.Array, np.ndarray], # shape: (n_queries,)
         precursor_mz_tolerance: float = 10,
         precursor_mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_precursor_RTs: Optional[np.ndarray] = None,
+        query_precursor_RTs: Optional[Union[da.Array, np.ndarray]] = None,
         precursor_RT_tolerance: float = 0.1,
         return_matrix: bool = False, # if True, return a matrix of shape (n_queries, n_formulas), dtype: bool, indicating which formulas are present for each query
     ) -> Union[
@@ -588,10 +617,13 @@ class SpecLib:
     def search_embedding(
         self,
         embedding_name: str,
-        query_embedding: np.ndarray, # shape: (n_queries, embedding_dim)
-        query_precursor_mzs: Optional[np.ndarray] = None, # shape: (n_queries,)
+        query_embedding: Union[np.ndarray,da.Array], # shape: (n_queries, embedding_dim)
+        query_precursor_mzs: Union[np.ndarray,da.Array,None] = None, # shape: (n_queries,)
+        adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
         precursor_mz_tolerance: float = 10,
         precursor_mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+        query_RTs: Union[np.ndarray,da.Array,None] = None,
+        RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
         precursor_search_type: Literal['mol', 'spec'] = 'mol',
@@ -604,47 +636,71 @@ class SpecLib:
         ]
     ]:
         mask = None
-        adduct_map = None
+        adduct_map = False
+        
         if query_precursor_mzs is not None and len(self.MolLib) > 0 and precursor_search_type == 'mol':
-            adduct_map,matrix = self.MolLib.fragments.search(
-                query_mzs=query_precursor_mzs,
-                mz_tolerance=precursor_mz_tolerance,
-                mz_tolerance_type=precursor_mz_tolerance_type,
-                adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
-                return_matrix=True,
+            bool_matrix = self.FragmentLib.search_to_matrix(
+                query_precursor_mzs,adducts,
+                precursor_mz_tolerance,precursor_mz_tolerance_type,
+                query_RTs,RT_tolerance,
+                adduct_co_occurrence_threshold,
             )
-            mask = matrix.sum(axis=-1) > 0
+            mask = da.sum(bool_matrix, axis=-1) > 0
+            indices = da.argwhere(bool_matrix)
+            adduct_map = True
+            
         if query_precursor_mzs is not None and len(self.precursors) > 0 and precursor_search_type =='spec':
-            matrix = self.search_precursors_to_matrix(
+            bool_matrix = self.search_precursors_to_matrix(
                 query_precursor_mzs,
                 precursor_mz_tolerance,
                 precursor_mz_tolerance_type,
             )
-            mask = matrix.sum(axis=-1) > 0
+            mask = da.sum(bool_matrix, axis=-1) > 0
+            indices = da.argwhere(bool_matrix)
         
         ref_embedding = self.spec_embedding(embedding_name)
         if ref_embedding is None:
             raise ValueError(f"No embedding named {embedding_name} found in SpecLib.")
         
-        index,scores = tools.search_embeddings_numpy(
+        index,scores = tools.search_embeddings(
             query_embedding,
             ref_embedding,
             mask,top_k,
         )
-        smiles = np.take_along_axis(self.mol_smiles[np.newaxis,:], index, axis=1)
-        results = {
-            'index': index.tolist(),
-            'smiles': smiles.tolist(),
-            'score': scores.tolist(),
+        
+        da_smiles = da.asarray(self.mol_smiles.values,chunks=len(self.mol_smiles))
+        da_formula = da.asarray(self.mol_formulas.values,chunks=len(self.mol_formulas))
+        smiles = []
+        formula_array = []
+        for i in range(len(index)):
+            smiles.append(da.take(da_smiles, index[i]))
+            formula_array.append(da.take(da_formula, index[i]))
+        smiles = da.stack(smiles,axis=0)
+        formula_array = da.stack(formula_array,axis=0)
+        
+        results:Dict[str,np.ndarray] = {
+            'index': index,
+            'smiles': smiles,
+            'score': scores,
         }
-        if adduct_map is not None:
+        
+        if adduct_map is True:
+            results,indices,formula_array = dask.compute(results,indices,formula_array)
+            adduct_map = tools.decode_matrix_to_fragments(
+                self.mol_formulas,self.FragmentLib.get_MZs_by_adducts(adducts),
+                query_precursor_mzs,indices,
+            )
             adduct_list: List[List[str]] = []
-            formula_array = np.take_along_axis(self.MolLib.Formulas.values[np.newaxis,:], index, axis=1)
             for formulas,adducts in zip(formula_array,adduct_map):
                 adduct_list.append([])
                 for formula in formulas:
                     adduct_list[-1].append(adducts[formula])
             results['adduct'] = adduct_list
+        else:
+            (results,) = dask.compute(results)
+        for key,value in results.items():
+            if isinstance(value, np.ndarray):
+                results[key] = value.tolist()
         return results
     
     def to_bytes(self) -> bytes:
