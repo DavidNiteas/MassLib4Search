@@ -16,7 +16,7 @@ from MZInferrer.mzinferrer.mz_infer_tools import Fragment,Adduct
 
 class FragLib:
     
-    non_adduct_columns = frozenset(['formula', 'RT'])
+    non_adduct_columns = frozenset(['formula', 'RT', '[M]'])
     defualt_positive_adducts = ['[M]','[M+H]+', '[M+NH4]+', '[M+Na]+', '[M+K]+']
     defualt_negative_adducts = ['[M]', '[M-H]-', '[M+COOH]-', '[M+CH3COO]-']
     
@@ -87,6 +87,26 @@ class FragLib:
     def __len__(self):
         return len(self.index)
     
+    def add_adducts(
+        self,
+        adducts: List[str],
+        scheduler: Optional[str] = None,
+        num_workers: Optional[int] = None,
+    ) -> None:
+        adducts:List[Adduct] = [Adduct.from_adduct_string(adduct_string) for adduct_string in adducts if adduct_string not in self.Adducts]
+        new_fragments:Dict[str,List[float]] = {}
+        if '[M]' in self.Fragments.columns:
+            exact_masses = db.from_sequence(self.Fragments['[M]'],npartitions=num_workers)
+        else:
+            formulas = db.from_sequence(self.Formulas,npartitions=num_workers)
+            exact_masses = formulas.map(lambda x: Fragment.from_formula_string(x).ExactMass if x is not None else None)
+        for adduct in adducts:
+            predict_mz_func = partial(tools.predict_adduct_mz, adduct)
+            new_fragments[str(adduct)] = exact_masses.map(predict_mz_func)
+        (new_fragments,) = dask.compute(new_fragments,scheduler=scheduler,num_workers=num_workers)
+        for adduct_string, adduct_mzs in new_fragments.items():
+            self.Fragments[adduct_string] = adduct_mzs
+    
     @property
     def index(self):
         return self.Fragments.index
@@ -107,6 +127,9 @@ class FragLib:
     def MZs(self):
         return self.Fragments[self.Adducts]
     
+    def get_MZs_by_adducts(self, adducts: List[str]) -> pd.DataFrame:
+        return self.Fragments[adducts]
+    
     @property
     def RTs(self) -> Optional[pd.Series]:
         return self.Fragments.get('RT', None)
@@ -117,28 +140,59 @@ class FragLib:
         
     def search_to_matrix(
         self,
-        query_mzs: np.ndarray, # shape: (n_ions,)
+        query_mzs: Union[np.ndarray,da.Array], # shape: (n_ions,)
+        adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
         mz_tolerance: float = 3,
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
         query_RTs: Optional[np.ndarray] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
-    ) -> np.ndarray: # shape: (n_queries, n_formulas), dtype: bool
+    ) -> da.Array: # shape: (n_queries, n_formulas), dtype: bool
+        '''
+        Search chemical formulas in reference library and return a boolean presence matrix \n
+        在参考库中搜索化学式并返回布尔值存在矩阵
+        
+        Args:
+            query_mzs: Array of m/z values to search (待查询的m/z数组)
+            adducts: 
+                - 'all_adducts': Consider all non-parent adducts (考虑所有非母体加合物)
+                - 'no_adducts': Only consider parent ion [M] (仅考虑母体离子[M])
+                - Custom list: Specify adducts to consider (自定义加合物列表)
+            mz_tolerance: Mass-to-charge tolerance (质荷比容差)
+            mz_tolerance_type: 'ppm' (parts-per-million) or 'Da' (Daltons) (容差类型)
+            query_RTs: Retention times for queries (optional) (查询保留时间，可选)
+            RT_tolerance: Retention time tolerance in minutes (保留时间容差/分钟)
+            adduct_co_occurrence_threshold: Minimum number of required adduct co-occurrences (加合物共现的最小数量阈值)
+        
+        Returns:
+            da.Array: Boolean matrix (n_queries, n_formulas) indicating formula presence (二维命中矩阵)
+            
+        Note:
+            This function is a lazy operation, it will not compute anything until you call dask.compute on the result.
+            该函数是一个懒惰操作,直到你调用dask.compute来计算结果时才会进行计算。
+        '''
+        if adducts == 'all_adducts':
+            adducts = self.Adducts
+        elif adducts == 'no_adducts':
+            adducts = ['[M]']
+        ref_fragment_table = self.get_MZs_by_adducts(adducts)
+        
         results = tools.search_fragments_to_matrix(
-            self.MZs,query_mzs,
+            ref_fragment_table,query_mzs,
             mz_tolerance,mz_tolerance_type,
             self.RTs,query_RTs,RT_tolerance,
             adduct_co_occurrence_threshold,
         )
-        results:np.ndarray = results.sum(axis=-1) > 0
+        results = results.sum(axis=-1) > 0
         return results
         
     def search(
         self,
-        query_mzs: np.ndarray, # shape: (n_ions,)
+        query_mzs: Union[np.ndarray,da.Array], # shape: (n_ions,)
+        adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
         mz_tolerance: float = 3,
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Optional[np.ndarray] = None,
+        query_RTs: Union[np.ndarray,da.Array,None] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         return_matrix: bool = False, # if True, return a matrix of shape (n_queries, n_formulas), dtype: bool, indicating which formulas are present for each query
@@ -146,8 +200,37 @@ class FragLib:
         List[Dict[str, str]], # List[Dict[formula, adduct]]
         Tuple[List[Dict[str, str]], np.ndarray],
     ]:
+        '''
+        Perform chemical formula search and return matching results \n
+        执行化学式搜索并返回匹配结果
+        
+        Args:
+            query_mzs: Array of m/z values to search (待查询的m/z数组)
+            adducts: Adduct selection mode (加合物选择模式)
+            mz_tolerance: Mass-to-charge tolerance (质荷比容差)
+            mz_tolerance_type: 'ppm' or 'Da' (容差类型)
+            query_RTs: Retention times for queries (optional) (查询保留时间，可选)
+            RT_tolerance: Retention time tolerance (保留时间容差)
+            adduct_co_occurrence_threshold: Minimum adduct co-occurrences (加合物共现阈值)
+            return_matrix: Whether to return presence matrix (是否返回存在矩阵)
+        
+        Returns:
+            Union:
+                - List[Dict]: For each query, dictionary of {formula: adduct} (匹配结果字典列表)
+                - Tuple: (Results list, presence matrix) when return_matrix=True (包含结果和命中矩阵的元组)
+        
+        Note:
+            When using RT filtering, both query_RTs and library RTs must be provided
+            使用保留时间筛选时，必须提供查询和库的保留时间数据
+        '''
+        if adducts == 'all_adducts':
+            adducts = self.Adducts
+        elif adducts == 'no_adducts':
+            adducts = ['[M]']
+        ref_fragment_table = self.get_MZs_by_adducts(adducts)
+        
         results = tools.search_fragments(
-            self.Formulas,self.MZs,query_mzs,
+            self.Formulas,ref_fragment_table,query_mzs,
             mz_tolerance,mz_tolerance_type,
             self.RTs,query_RTs,RT_tolerance,
             adduct_co_occurrence_threshold,
