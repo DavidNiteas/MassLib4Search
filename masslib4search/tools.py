@@ -141,7 +141,7 @@ def search_fragments_to_matrix(
 
 def decode_matrix_to_fragments(
     formulas: pd.Series,
-    ref_fragment_table: pd.DataFrame, # shape: (n_fragments, n_adducts), columns: adducts
+    adducts: pd.Series,
     bool_matrix: np.ndarray, # shape: (n_ions, n_fragments, n_adducts)
     index_list: Optional[List[Optional[np.ndarray]]] = None, # List[1d-array]
 ) -> Dict[
@@ -168,8 +168,8 @@ def decode_matrix_to_fragments(
             return np.array(tag_index)
         
         tag_index_db = tag_index_db.map(get_index)
-    tag_formula = tag_index_db.map(lambda x: formulas[x[:,0]] if x is not None else None)
-    tag_adduct = tag_index_db.map(lambda x: ref_fragment_table.columns[x[:,1]] if x is not None else None)
+    tag_formula = tag_index_db.map(lambda x: formulas[x[:,0]].values if x is not None else None)
+    tag_adduct = tag_index_db.map(lambda x: adducts[x[:,1]].values if x is not None else None)
     tag_formula,tag_adduct = dask.compute(tag_formula,tag_adduct,scheduler='threads')
     return {'formula': tag_formula, 'adduct': tag_adduct}
 
@@ -227,7 +227,8 @@ def search_fragments(
     
     # decode results
     print('Decoding fragments from hit matrix...')
-    results = decode_matrix_to_fragments(formulas, ref_fragment_table, bool_matrix)
+    adduct = pd.Series(ref_fragment_table.columns.values)
+    results = decode_matrix_to_fragments(formulas, adduct, bool_matrix)
     if return_matrix:
         return results, bool_matrix
     return results

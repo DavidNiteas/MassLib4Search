@@ -699,7 +699,7 @@ class SpecLib:
             print('Decoding matrix to Fragments...')
             fragments = tools.decode_matrix_to_fragments(
                 formulas=self.mol_formulas,
-                ref_fragment_table=self.FragmentLib.get_MZs_by_adducts(adducts),
+                adducts=pd.Series(adducts),
                 bool_matrix=bool_matrix,
                 index_list=index,
             )
