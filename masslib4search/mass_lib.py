@@ -7,6 +7,8 @@ from functools import partial
 import numpy as np
 import pandas as pd
 from . import tools
+from rich.progress import track
+from rich import print
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable
 
 # dev import
@@ -147,7 +149,7 @@ class FragLib:
         query_RTs: Optional[np.ndarray] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
-    ) -> da.Array: # shape: (n_queries, n_formulas), dtype: bool
+    ) -> da.Array: # shape: (n_ions, n_fragments, n_adducts)
         '''
         Search chemical formulas in reference library and return a boolean presence matrix \n
         在参考库中搜索化学式并返回布尔值存在矩阵
@@ -171,14 +173,17 @@ class FragLib:
             This function is a lazy operation, it will not compute anything until you call dask.compute on the result.
             该函数是一个懒惰操作,直到你调用dask.compute来计算结果时才会进行计算。
         '''
-        if adducts == 'all_adducts':
-            adducts = self.Adducts
-        elif adducts == 'no_adducts':
-            adducts = ['[M]']
+        
+        if isinstance(adducts, str):
+            if adducts == 'all_adducts':
+                adducts = self.Adducts
+            elif adducts == 'no_adducts':
+                adducts = ['[M]']
+                
         ref_fragment_table = self.get_MZs_by_adducts(adducts)
         
         results = tools.search_fragments_to_matrix(
-            ref_fragment_table,query_mzs,
+            ref_fragment_table.values,query_mzs,
             mz_tolerance,mz_tolerance_type,
             self.RTs,query_RTs,RT_tolerance,
             adduct_co_occurrence_threshold,
@@ -628,26 +633,29 @@ class SpecLib:
         top_k: int = 5, # number of hits to return for each query
         precursor_search_type: Literal['mol', 'spec'] = 'mol',
     ) -> Dict[
-        Literal['index','smiles','score','adduct'],
-        Union[
-            List[List[int]], # list of indices
-            List[List[str]], # list of SMILES strings and adducts
-            List[List[float]], # list of scores
-        ]
+        Literal['index','smiles','score','formula','adduct'],
+        np.ndarray, # array of indices, array of SMILES strings, array of scores, array of formulas, array of adducts
     ]:
+        
+        bool_matrix = None
         mask = None
-        adduct_map = False
+        map_adducts = False
         
         if query_precursor_mzs is not None and len(self.MolLib) > 0 and precursor_search_type == 'mol':
+            
+            if isinstance(adducts, str):
+                if adducts == 'all_adducts':
+                    adducts = self.MolLib.Adducts
+                elif adducts == 'no_adducts':
+                    adducts = ['[M]']
+            
             bool_matrix = self.FragmentLib.search_to_matrix(
                 query_precursor_mzs,adducts,
                 precursor_mz_tolerance,precursor_mz_tolerance_type,
                 query_RTs,RT_tolerance,
                 adduct_co_occurrence_threshold,
             )
-            mask = da.sum(bool_matrix, axis=-1) > 0
-            indices = da.argwhere(bool_matrix)
-            adduct_map = True
+            map_adducts = True
             
         if query_precursor_mzs is not None and len(self.precursors) > 0 and precursor_search_type =='spec':
             bool_matrix = self.search_precursors_to_matrix(
@@ -655,52 +663,49 @@ class SpecLib:
                 precursor_mz_tolerance,
                 precursor_mz_tolerance_type,
             )
+            
+        if bool_matrix is not None:
             mask = da.sum(bool_matrix, axis=-1) > 0
-            indices = da.argwhere(bool_matrix)
+            print('Searching Precursors...')
+            bool_matrix,mask = dask.compute(bool_matrix,mask)
+            print('Decoding hit matrix to indices...')
+            mask = db.from_sequence(mask,partition_size=1)
+            frag_indexs = mask.map(lambda x: np.argwhere(x).flatten())
+            frag_indexs = frag_indexs.compute(scheduler='threads')
         
         ref_embedding = self.spec_embedding(embedding_name)
         if ref_embedding is None:
             raise ValueError(f"No embedding named {embedding_name} found in SpecLib.")
         
+        print('Searching SpecLib...')
         index,scores = tools.search_embeddings(
             query_embedding,
             ref_embedding,
-            mask,top_k,
+            frag_indexs,top_k,
         )
+
+        print('Decoding matrix to Smiles...')
+        index_db = db.from_sequence(index)
         
-        da_smiles = da.asarray(self.mol_smiles.values,chunks=len(self.mol_smiles))
-        da_formula = da.asarray(self.mol_formulas.values,chunks=len(self.mol_formulas))
-        smiles = []
-        formula_array = []
-        for i in range(len(index)):
-            smiles.append(da.take(da_smiles, index[i]))
-            formula_array.append(da.take(da_formula, index[i]))
-        smiles = da.stack(smiles,axis=0)
-        formula_array = da.stack(formula_array,axis=0)
-        
+        smiles = index_db.map(lambda x: self.mol_smiles.values[x] if x is not None else None)
+        smiles = smiles.compute(scheduler='threads')
         results:Dict[str,np.ndarray] = {
             'index': index,
             'smiles': smiles,
             'score': scores,
         }
         
-        if adduct_map is True:
-            results,indices,formula_array = dask.compute(results,indices,formula_array)
-            adduct_map = tools.decode_matrix_to_fragments(
-                self.mol_formulas,self.FragmentLib.get_MZs_by_adducts(adducts),
-                query_precursor_mzs,indices,
+        if map_adducts is True:
+            print('Decoding matrix to Fragments...')
+            fragments = tools.decode_matrix_to_fragments(
+                formulas=self.mol_formulas,
+                ref_fragment_table=self.FragmentLib.get_MZs_by_adducts(adducts),
+                bool_matrix=bool_matrix,
+                index_list=index,
             )
-            adduct_list: List[List[str]] = []
-            for formulas,adducts in zip(formula_array,adduct_map):
-                adduct_list.append([])
-                for formula in formulas:
-                    adduct_list[-1].append(adducts[formula])
-            results['adduct'] = adduct_list
-        else:
-            (results,) = dask.compute(results)
-        for key,value in results.items():
-            if isinstance(value, np.ndarray):
-                results[key] = value.tolist()
+            results['formula'] = fragments['formula']
+            results['adduct'] = fragments['adduct']
+            
         return results
     
     def to_bytes(self) -> bytes:

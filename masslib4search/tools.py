@@ -9,7 +9,7 @@ import pandas as pd
 # from mzinferrer.mz_infer_tools import Fragment
 import pickle
 import rich.progress
-from rich.progress import track
+from rich import print
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
@@ -92,8 +92,8 @@ def search_fragments_to_matrix(
     '''
     
     # convert to dask arrays
-    ref_fragments = da.asarray(ref_fragments)
-    query_ions = da.asarray(query_ions)
+    ref_fragments = da.asarray(ref_fragments,chunks=(5120, 1))
+    query_ions = da.asarray(query_ions,chunks=(5120,))
     
     # calculate mass difference matrix
     d_matrix = da.abs(query_ions[:, None, None] - ref_fragments[None, :, :])
@@ -108,8 +108,8 @@ def search_fragments_to_matrix(
     # handle RT condition
     if ref_RTs is not None and query_RTs is not None:
         # convert to dask arrays
-        ref_RTs = da.asarray(ref_RTs)
-        query_RTs = da.asarray(query_RTs)
+        ref_RTs = da.asarray(ref_RTs,chunks=(5120,))
+        query_RTs = da.asarray(query_RTs,chunks=(5120,))
         # calculate RT difference matrix
         d_matrix_RT = da.abs(query_RTs[:, None] - ref_RTs[None, :])
         bool_matrix_RT = d_matrix_RT <= RT_tolerance
@@ -124,20 +124,54 @@ def search_fragments_to_matrix(
     
     return I_F_D_matrix
 
+# def decode_matrix_to_fragments(
+#     formulas: pd.Series,
+#     ref_fragment_table: pd.DataFrame, # shape: (n_fragments, n_adducts), columns: adducts
+#     query_ions: np.ndarray, # shape: (n_ions,)
+#     indices: np.ndarray, # shape: (ion_index, formula_index, adduct_index)
+# ) -> List[Dict[str, str]]: # List[Dict[formula, adduct]]
+#     results: Dict[int, Dict[str, str]] = {}
+#     for ion_index, formula_index, adduct_index in indices:
+#         if ion_index not in results:
+#             results[ion_index] = {}
+#         formula = formulas[formula_index]
+#         results[ion_index][formula] = ref_fragment_table.columns[adduct_index]
+#     results = dict2list(results, len(query_ions), {})
+#     return results
+
 def decode_matrix_to_fragments(
     formulas: pd.Series,
     ref_fragment_table: pd.DataFrame, # shape: (n_fragments, n_adducts), columns: adducts
-    query_ions: np.ndarray, # shape: (n_ions,)
-    indices: np.ndarray, # shape: (ion_index, formula_index, adduct_index)
-) -> List[Dict[str, str]]: # List[Dict[formula, adduct]]
-    results: Dict[int, Dict[str, str]] = {}
-    for ion_index, formula_index, adduct_index in indices:
-        if ion_index not in results:
-            results[ion_index] = {}
-        formula = formulas[formula_index]
-        results[ion_index][formula] = ref_fragment_table.columns[adduct_index]
-    results = dict2list(results, len(query_ions), {})
-    return results
+    bool_matrix: np.ndarray, # shape: (n_ions, n_fragments, n_adducts)
+    index_list: Optional[List[Optional[np.ndarray]]] = None, # List[1d-array]
+) -> Dict[
+    Literal['formula', 'adduct'],
+    List[np.ndarray], # list len: n_ions, item shape: (tag_formula_num,)
+]:
+    if index_list is None:
+        bool_matrix_db = db.from_sequence(bool_matrix, partition_size=1)
+        tag_index_db = bool_matrix_db.map(lambda x: np.argwhere(x))
+        tag_index_db = tag_index_db.map(lambda x: x if len(x) > 0 else None)
+    else:
+        tag_index_db = db.from_sequence(zip(bool_matrix, index_list), partition_size=1)
+
+        def get_index(x: Tuple[np.ndarray, Optional[np.ndarray]]) -> Optional[np.ndarray]:
+            item_bool_matrix, index_vector = x
+            if index_vector is None:
+                return None
+            if len(index_vector) == 0:
+                return None
+            tag_index = []
+            for adduct_vector, formula_index in zip(item_bool_matrix[index_vector,:], index_vector):
+                adduct_index = np.argwhere(adduct_vector).item()
+                tag_index.append([formula_index, adduct_index])
+            return np.array(tag_index)
+        
+        tag_index_db = tag_index_db.map(get_index)
+    tag_formula = tag_index_db.map(lambda x: formulas[x[:,0]] if x is not None else None)
+    tag_adduct = tag_index_db.map(lambda x: ref_fragment_table.columns[x[:,1]] if x is not None else None)
+    tag_formula,tag_adduct = dask.compute(tag_formula,tag_adduct,scheduler='threads')
+    return {'formula': tag_formula, 'adduct': tag_adduct}
 
 def search_fragments(
     formulas: pd.Series,
@@ -151,8 +185,17 @@ def search_fragments(
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
     return_matrix: bool = False, # if True, return a boolean matrix indicating whether a given ion can form a fragment with a given adduct.
 ) -> Union[
-    List[Dict[str, str]], # List[Dict[formula, adduct]]
-    Tuple[List[Dict[str, str]], np.ndarray],
+        Dict[
+            Literal['formula', 'adduct'],
+            List[np.ndarray], # list len: n_ions, item shape: (tag_formula_num,)
+        ],
+        Tuple[
+            Dict[
+                Literal['formula', 'adduct'],
+                List[np.ndarray], # list len: n_ions, item shape: (tag_formula_num,)
+            ],
+            np.ndarray
+        ], # if return_matrix is True, return a boolean matrix indicating whether a given ion can form a fragment with a given adduct.
 ]:
     '''
     该函数生成一个字典列表，用于表征问询离子与参考碎片的配对情况。
@@ -178,14 +221,13 @@ def search_fragments(
         adduct_co_occurrence_threshold,
     )
     
-    # get indices
-    indices = da.argwhere(bool_matrix)
-    
     # run computation graph
-    bool_matrix, indices, ref_fragment_table, query_ions = dask.compute(bool_matrix, indices, ref_fragment_table, query_ions)
+    print('Calculating fragments hit matrix...')
+    bool_matrix, ref_fragment_table, query_ions = dask.compute(bool_matrix, ref_fragment_table, query_ions)
     
     # decode results
-    results = decode_matrix_to_fragments(formulas, ref_fragment_table, query_ions, indices)
+    print('Decoding fragments from hit matrix...')
+    results = decode_matrix_to_fragments(formulas, ref_fragment_table, bool_matrix)
     if return_matrix:
         return results, bool_matrix
     return results
@@ -198,54 +240,99 @@ def search_fragments(
 #     S, I = faiss_index.search(embeddings, k=top_k)
 #     return I[0], S[0]
 
-def cosine_similarity(
+def cosine_similarity_dask(
     query_embeddings: Union[da.Array, np.ndarray], # shape: (n_query_items, n_dim)
     ref_embeddings: Union[da.Array, np.ndarray], # shape: (n_ref_items, n_dim)
 ) -> da.Array: # shape: (n_query_items, n_ref_items)
-    query_embeddings = da.asarray(query_embeddings)
-    ref_embeddings = da.asarray(ref_embeddings)
+    query_embeddings = da.asarray(query_embeddings, chunks=(5120, -1))
+    ref_embeddings = da.asarray(ref_embeddings, chunks=(5120, -1))
     dot_product = da.dot(query_embeddings, ref_embeddings.T)
     norm_query = da.linalg.norm(query_embeddings, axis=1, keepdims=True)
     norm_ref = da.linalg.norm(ref_embeddings, axis=1, keepdims=True)
     score_matrix = dot_product / (norm_query * norm_ref.T)
     return score_matrix
 
-def infer_I_S_from_score_matrix(
-    score_matrix: Union[da.Array, np.ndarray], # shape: (n_query_items, n_ref_items)
-    top_k: int,
-    ) -> Tuple[da.Array, da.Array]: # shape: (n_query_items, top_k), (n_query_items, top_k)
-    score_matrix = da.asarray(score_matrix)
-    I = da.argtopk(-score_matrix, top_k, axis=-1)
+def cosine_similarity_np(
+    query_embeddings: np.ndarray, # shape: (n_dim)
+    ref_embeddings: np.ndarray, # shape: (n_ref_items, n_dim)
+) -> np.ndarray: # shape: (n_ref_items)
+    query_embeddings = query_embeddings[np.newaxis,:]
+    dot_product = np.dot(query_embeddings, ref_embeddings.T)
+    norm_query = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
+    norm_ref = np.linalg.norm(ref_embeddings, axis=1, keepdims=True)
+    score_matrix = dot_product / (norm_query * norm_ref.T)
+    return score_matrix[0]
+
+def deocde_index_and_score(
+    score_matrix: Union[
+        np.ndarray,  # shape: (n_query_items, n_ref_items)
+        List[np.ndarray],  # len: n_query_items, each element shape: (n_ref_items,)
+    ],
+    top_k: Optional[int] = None,
+) -> Tuple[List[Optional[np.ndarray]], List[Optional[np.ndarray]]]: # shape: (n_query_items, top_k), (n_query_items, top_k)
+    
+    score_db = db.from_sequence(score_matrix)
+    
+    def decoder(score_vector:Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+        if score_vector is not None:
+            if top_k is None:
+                I = np.argsort(score_vector)[::-1]
+            else:
+                I = np.argsort(score_vector)[::-1][:top_k]
+            S = score_vector[I]
+        else:
+            I,S = None,None
+        return I, S
+    
+    IS_pairs = score_db.map(decoder)
+    
+    IS_pairs = IS_pairs.compute(scheduler='threads')
+    
+    I = []
     S = []
-    for i in range(len(score_matrix)):
-        S.append(da.take(score_matrix[i], I[i]))
-    S = da.stack(S,axis=0)
+    for i_vector, s_vector in IS_pairs:
+        I.append(i_vector)
+        S.append(s_vector)
+    
     return I, S
 
 def search_embeddings(
     query_embeddings: Union[da.Array, np.ndarray], # shape: (n_query_items, n_dim)
     ref_embeddings: Union[da.Array, np.ndarray], # shape: (n_ref_items, n_dim)
-    mask: Optional[Union[da.Array, np.ndarray]] = None, # shape: (n_query_items,n_ref_items)
+    tag_index: Optional[List[np.ndarray]] = None,
     top_k: Optional[int] = None,
-    return_no_mask: bool = False,
-) -> Union[
-    Tuple[da.Array, da.Array],
-    Tuple[da.Array, da.Array, da.Array, da.Array], # if return_no_mask is True
+) -> Tuple[
+    List[np.ndarray], # index of tag ref, len: n_query_items, each element shape: (top_k,)
+    List[np.ndarray], # score of tag ref, len: n_query_items, each element shape: (top_k,)
 ]:
-    if top_k is None:
-        top_k = len(ref_embeddings)
-    score_matrix = cosine_similarity(query_embeddings, ref_embeddings)
-    if mask is not None:
-        mask = da.asarray(mask)
-        masked_score_matrix = score_matrix * mask
+    if tag_index is None:
+        print('Calculating score matrix...')
+        score_matrix = cosine_similarity_dask(query_embeddings, ref_embeddings)
+        score_matrix = score_matrix.compute(scheduler='threads')
     else:
-        masked_score_matrix = score_matrix
-    I, S = infer_I_S_from_score_matrix(masked_score_matrix, top_k)
-    if return_no_mask:
-        I_no_mask, S_no_mask = infer_I_S_from_score_matrix(score_matrix, top_k)
-        return I, S, I_no_mask, S_no_mask
-    else:
-        return I, S
+        print('Initializing embeddings...')
+        query_embeddings, ref_embeddings = dask.compute(query_embeddings, ref_embeddings)
+        score_matrix = db.from_sequence(zip(query_embeddings,tag_index),partition_size=1)
+        
+        def score_func(item: Tuple[np.ndarray,np.ndarray]) -> Optional[np.ndarray]:
+            query_vector, ref_index = item
+            if len(ref_index) == 0:
+                return None
+            ref_vector = ref_embeddings[ref_index]
+            score_vector = cosine_similarity_np(query_vector, ref_vector)
+            return score_vector
+        
+        score_matrix = score_matrix.map(score_func)
+        print('Calculating score matrix by tag index...')
+        score_matrix = score_matrix.compute(scheduler='threads')
+    
+    print('Decoding score matrix...')
+    I,S = deocde_index_and_score(score_matrix, top_k)
+    if tag_index is not None:
+        for i in range(len(I)):
+            if I[i] is not None:
+                I[i] = tag_index[i][I[i]]
+    return I,S
 
 def infer_precursors_table(
     PI: Optional[List[float]] = None,
@@ -280,8 +367,8 @@ def search_precursors_to_matrix(
 ) -> da.Array: # shape: (n_query_precursors, n_ref_precursors)
     
     # convert to dask arrays
-    query_precursor_mzs = da.asarray(query_precursor_mzs)
-    ref_precursor_mzs = da.asarray(ref_precursor_mzs)
+    query_precursor_mzs = da.asarray(query_precursor_mzs,chunks=(5120,))
+    ref_precursor_mzs = da.asarray(ref_precursor_mzs,chunks=(5120,))
     
     # calculate mass difference matrix
     d_matrix = da.abs(query_precursor_mzs[:, None] - ref_precursor_mzs[None,:])
@@ -296,8 +383,8 @@ def search_precursors_to_matrix(
     # handle RT condition
     if query_precursor_RTs is not None and ref_precursor_RTs is not None:
         # convert to dask arrays
-        query_precursor_RTs = da.asarray(query_precursor_RTs)
-        ref_precursor_RTs = da.asarray(ref_precursor_RTs)
+        query_precursor_RTs = da.asarray(query_precursor_RTs,chunks=(5120,))
+        ref_precursor_RTs = da.asarray(ref_precursor_RTs,chunks=(5120,))
         # calculate RT difference matrix
         d_matrix_RT = da.abs(query_precursor_RTs[:, None] - ref_precursor_RTs[None, :])
         bool_matrix_RT = d_matrix_RT <= RT_tolerance
@@ -335,12 +422,10 @@ def search_precursors(
         query_precursor_mzs, ref_precursor_mzs, mz_tolerance, mz_tolerance_type, 
         query_precursor_RTs, ref_precursor_RTs, RT_tolerance,
     )
-    indices = da.argwhere(bool_matrix)
+    bool_matrix = dask.compute(bool_matrix)
+    indices = np.argwhere(bool_matrix)
+    results =  decode_precursors_matrix_to_index(indices)
     if return_matrix:
-        (indices,bool_matrix) = dask.compute(indices,bool_matrix)
-        results =  decode_precursors_matrix_to_index(indices)
         return results, bool_matrix
     else:
-        (indices,) = dask.compute(indices)
-        results = decode_precursors_matrix_to_index(indices)
         return results
