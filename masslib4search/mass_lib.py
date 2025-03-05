@@ -9,14 +9,135 @@ import pandas as pd
 from . import tools
 from rich.progress import track
 from rich import print
-from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable
+from abc import ABC, abstractmethod
+from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
 # dev import
 import sys
 sys.path.append('.')
 from MZInferrer.mzinferrer.mz_infer_tools import Fragment,Adduct
 
-class FragLib:
+class BaseLib(ABC):
+    
+    @property
+    @abstractmethod
+    def index(self) -> pd.Index:
+        pass
+    
+    def __len__(self):
+        return len(self.index)
+    
+    def format_i_selection(
+        self,
+        i: Union[int,slice,Sequence[int],None],
+    ) -> List[int]:
+        match i:
+            case int():
+                return [i]
+            case slice():
+                return range(*i.indices(len(self)))
+            case Sequence():
+                return i
+            case None:
+                return []
+            case _:
+                raise TypeError(f"select index must be int, slice or sequence, not {type(i)}")
+    
+    def key2i(self, key: Sequence[Hashable]) -> List[int]:
+        return list(self.index.get_indexer_for(key))
+            
+    def format_key_selection(
+        self,
+        key: Union[Hashable,Sequence[Hashable],None], 
+    ) -> List[int]:
+        match key:
+            case Hashable():
+                return self.key2i([key])
+            case Sequence():
+                return self.key2i(key)
+            case None:
+                return []
+            case _:
+                raise TypeError(f"select key must be hashable or sequence, not {type(key)}")
+            
+    def format_bool_selection(
+        self,
+        bool_selection: Sequence[bool],
+    ) -> List[int]:
+        return np.argwhere(bool_selection).flatten().tolist()
+    
+    def format_selection(
+        self,
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]],
+    ) -> List[int]:
+        iloc = []
+        match i_and_key:
+            case int() | slice() | Sequence() if not isinstance(i_and_key, tuple):
+                iloc.extend(self.format_i_selection(i_and_key))
+            case tuple():
+                if len(i_and_key) >= 1:
+                    iloc.extend(self.format_i_selection(i_and_key[0]))
+                if len(i_and_key) >= 2:
+                    iloc.extend(self.format_key_selection(i_and_key[1]))
+                if len(i_and_key) >= 3:
+                    iloc.extend(self.format_bool_selection(i_and_key[2]))
+        return iloc
+    
+    def item_select(
+        self,
+        item:Union[pd.Series,pd.DataFrame,np.ndarray,Any],
+        iloc:Sequence[int],
+    ) -> Union[pd.Series,pd.DataFrame,np.ndarray,Any]:
+        if hasattr(item, "__len__"):
+            if len(item) > 0:
+                match item:
+                    case pd.DataFrame():
+                        return item.iloc[iloc]
+                    case pd.Series():
+                        if len(item) == len(self):
+                            return item.iloc[iloc]
+                        else:
+                            return item.map(lambda x: self.item_select(x, iloc))
+                    case np.ndarray():
+                        return item[iloc]
+                    case BaseLib():
+                        return item.select(iloc)
+                    case _:
+                        if hasattr(item, "__getitem__"):
+                            return item[iloc]
+                        else:
+                            raise TypeError(f"item must be a splitable object, not {type(item)}")
+        else:
+            raise TypeError(f"item must be a lengthable object, not {type(item)}")
+    
+    @abstractmethod
+    def select(
+        self, 
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
+    ) -> BaseLib:
+        pass
+    
+    def __getitem__(
+        self, 
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
+    ) -> BaseLib:
+        return self.select(i_and_key)
+    
+    def to_bytes(self) -> bytes:
+        return tools.to_pickle_bytes(self)
+    
+    @classmethod
+    def from_bytes(cls, data: bytes) -> BaseLib:
+        return tools.from_pickle_bytes(data)
+    
+    def to_pickle(self, path: str):
+        tools.save_pickle(self, path)
+    
+    @classmethod
+    def from_pickle(cls, path: str) -> BaseLib:
+        return tools.load_pickle(path)
+    
+class FragLib(BaseLib):
     
     non_adduct_columns = frozenset(['formula', 'RT', '[M]'])
     defualt_positive_adducts = ['[M]','[M+H]+', '[M+NH4]+', '[M+Na]+', '[M+K]+']
@@ -85,9 +206,6 @@ class FragLib:
                 lazy_dict = self.lazy_init(formula, RT, adducts)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
-        
-    def __len__(self):
-        return len(self.index)
     
     def add_adducts(
         self,
@@ -232,31 +350,36 @@ class FragLib:
         elif adducts == 'no_adducts':
             adducts = ['[M]']
         ref_fragment_table = self.get_MZs_by_adducts(adducts)
+        ref_RTs = self.RTs.values if self.RTs is not None else None
         
         results = tools.search_fragments(
             self.Formulas,ref_fragment_table,query_mzs,
             mz_tolerance,mz_tolerance_type,
-            self.RTs,query_RTs,RT_tolerance,
+            ref_RTs,query_RTs,RT_tolerance,
             adduct_co_occurrence_threshold,
             return_matrix,
         )
         return results
     
-    def to_bytes(self) -> bytes:
-        return tools.to_pickle_bytes(self)
+    def select(
+        self, 
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
+    ) -> FragLib:
+        iloc = self.format_selection(i_and_key)
+        fragments_table = self.item_select(self.Fragments,iloc)
+        new_lib = FragLib()
+        new_lib.fragments = fragments_table
+        return new_lib
     
     @classmethod
     def from_bytes(cls, data: bytes) -> FragLib:
         return tools.from_pickle_bytes(data)
     
-    def to_pickle(self, path: str):
-        tools.save_pickle(self, path)
-    
     @classmethod
     def from_pickle(cls, path: str) -> FragLib:
         return tools.load_pickle(path)
 
-class MolLib:
+class MolLib(BaseLib):
     
     @staticmethod
     def lazy_init(
@@ -306,9 +429,6 @@ class MolLib:
                 lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
-        
-    def __len__(self):
-        return len(self.index)
     
     @property
     def index(self):
@@ -349,7 +469,7 @@ class MolLib:
     def mol_embedding(self, embedding_name: str) -> Optional[np.ndarray]:
         return self.embeddings.get(embedding_name, None)
     
-    def search(
+    def search_embedding(
         self,
         embedding_name: str,
         query_embedding: Union[np.ndarray,da.Array], # shape: (n_queries, embedding_dim)
@@ -362,85 +482,94 @@ class MolLib:
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
     ) -> Dict[
-        Literal['index','smiles','score','adduct'], # if query_mzs is None, adduct will not be included in the result
-        Union[
-            List[List[int]], # list of indices
-            List[List[str]], # list of SMILES strings and adducts
-            List[List[float]], # list of scores
-        ]
+        Literal['index','smiles','score','formula','adduct'],
+        np.ndarray, # array of indices, array of SMILES strings, array of scores, array of formulas, array of adducts
     ]:
+        
+        bool_matrix = None
         mask = None
-        adduct_map = None
+        map_adducts = False
+        
         if query_mzs is not None:
+            
+            if isinstance(adducts, str):
+                if adducts == 'all_adducts':
+                    adducts = self.Adducts
+                elif adducts == 'no_adducts':
+                    adducts = ['[M]']
+            
             bool_matrix = self.FragmentLib.search_to_matrix(
                 query_mzs,adducts,
                 mz_tolerance,mz_tolerance_type,
                 query_RTs,RT_tolerance,
                 adduct_co_occurrence_threshold,
             )
+            map_adducts = True
+            
+        if bool_matrix is not None:
             mask = da.sum(bool_matrix, axis=-1) > 0
-            indices = da.argwhere(bool_matrix)
-
+            print('Searching Precursors...')
+            bool_matrix,mask = dask.compute(bool_matrix,mask)
+            print('Decoding hit matrix to indices...')
+            mask = db.from_sequence(mask,partition_size=1)
+            frag_indexs = mask.map(lambda x: np.argwhere(x).flatten())
+            frag_indexs = frag_indexs.compute(scheduler='threads')
+        
         ref_embedding = self.mol_embedding(embedding_name)
         if ref_embedding is None:
             raise ValueError(f"No embedding named {embedding_name} found in MolLib")
         
+        print('Searching MolLib...')
         index,scores = tools.search_embeddings(
             query_embedding,
             ref_embedding,
             mask,top_k,
         )
         
-        da_smiles = da.asarray(self.SMILES.values,chunks=len(self.SMILES))
-        da_formula = da.asarray(self.Formulas.values,chunks=len(self.Formulas))
-        smiles = []
-        formula_array = []
-        for i in range(len(index)):
-            smiles.append(da.take(da_smiles, index[i]))
-            formula_array.append(da.take(da_formula, index[i]))
-        smiles = da.stack(smiles,axis=0)
-        formula_array = da.stack(formula_array,axis=0)
+        print('Decoding matrix to Smiles...')
+        index_db = db.from_sequence(index)
         
+        smiles = index_db.map(lambda x: self.SMILES.values[x] if x is not None else None)
+        smiles = smiles.compute(scheduler='threads')
         results:Dict[str,np.ndarray] = {
             'index': index,
             'smiles': smiles,
             'score': scores,
         }
         
-        if query_mzs is not None:
-            results,indices,formula_array = dask.compute(results,indices,formula_array)
-            adduct_map = tools.decode_matrix_to_fragments(
-                self.Formulas,self.FragmentLib.get_MZs_by_adducts(adducts),
-                query_mzs,indices,
+        if map_adducts is True:
+            print('Decoding matrix to Fragments...')
+            fragments = tools.decode_matrix_to_fragments(
+                formulas=self.SMILES,
+                adducts=pd.Series(adducts),
+                bool_matrix=bool_matrix,
+                index_list=index,
             )
-            adduct_list: List[List[str]] = []
-            for formulas,adducts in zip(formula_array,adduct_map):
-                adduct_list.append([])
-                for formula in formulas:
-                    adduct_list[-1].append(adducts[formula])
-            results['adduct'] = adduct_list
-        else:
-            (results,) = dask.compute(results)
-        for key,value in results.items():
-            if isinstance(value, np.ndarray):
-                results[key] = value.tolist()
+            results['formula'] = fragments['formula']
+            results['adduct'] = fragments['adduct']
+            
         return results
     
-    def to_bytes(self) -> bytes:
-        return tools.to_pickle_bytes(self)
+    def select(
+        self, 
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
+    ) -> MolLib:
+        iloc = self.format_selection(i_and_key)
+        new_lib = MolLib()
+        new_lib.smiles = self.item_select(self.smiles,iloc)
+        new_lib.fragments = self.item_select(self.fragments,iloc)
+        new_lib.embeddings = self.item_select(self.embeddings,iloc)
+        return new_lib
     
     @classmethod
     def from_bytes(cls, data: bytes) -> MolLib:
         return tools.from_pickle_bytes(data)
     
-    def to_pickle(self, path: str):
-        tools.save_pickle(self, path)
-    
     @classmethod
     def from_pickle(cls, path: str) -> MolLib:
         return tools.load_pickle(path)
 
-class SpecLib:
+class SpecLib(BaseLib):
     
     @staticmethod
     def lazy_init(
@@ -708,20 +837,22 @@ class SpecLib:
             
         return results
     
-    def to_bytes(self) -> bytes:
-        return tools.to_pickle_bytes(self)
+    def select(
+        self, 
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
+    ) -> SpecLib:
+        iloc = self.format_selection(i_and_key)
+        new_lib = SpecLib()
+        new_lib.precursors = self.item_select(self.precursors,iloc)
+        new_lib.peaks = self.item_select(self.peaks,iloc)
+        new_lib.spec_embeddings = self.item_select(self.spec_embeddings,iloc)
+        new_lib.mols = self.item_select(self.mols,iloc)
+        return new_lib
     
     @classmethod
     def from_bytes(cls, data: bytes) -> SpecLib:
         return tools.from_pickle_bytes(data)
     
-    def to_pickle(self, path: str):
-        tools.save_pickle(self, path)
-    
     @classmethod
     def from_pickle(cls, path: str) -> SpecLib:
         return tools.load_pickle(path)
-    
-class SpecRuleLib:
-    
-    pass
