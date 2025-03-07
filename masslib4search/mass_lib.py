@@ -203,7 +203,7 @@ class FragLib(BaseLib):
     ):
         if formula is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(formula, RT, adducts)
+                lazy_dict = self.lazy_init(formula, RT, adducts, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
@@ -387,13 +387,35 @@ class MolLib(BaseLib):
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
+        peak_patterns: Union[
+            List[
+                Dict[
+                    Hashable, # fragment name/id in ms2
+                    float # fragment m/z in ms2
+                ]
+            ],
+            db.Bag,
+            None,
+        ] = None,
+        loss_patterns: Union[
+            List[
+                Tuple[
+                    Dict[Hashable, float], # {delta name/id in ms2: delta m/z}
+                    List[List[Hashable]], # the sequence of loss pathways
+                ]
+            ],
+            db.Bag,
+            None,
+        ] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
-        Literal['smiles', 'embeddings', 'fragments'],
+        Literal['smiles', 'embeddings', 'fragments', 'peak_patterns', 'loss_patterns'],
         Union[
             db.Bag,
             List[str], # Adducts
             List[Optional[float]], #RT
+            List[Dict[Hashable, float]], # peak patterns
+            List[Tuple[Dict[Hashable, float], List[List[Hashable]]]] # loss patterns
         ]
     ]:
         if not isinstance(smiles, db.Bag):
@@ -404,6 +426,8 @@ class MolLib(BaseLib):
             'smiles': smiles,
             'embeddings': embeddings,
             'fragments': frag_lib_lazy_dict,
+            'peak_patterns': peak_patterns,
+            'loss_patterns': loss_patterns,
         }
         
     def from_lazy(
@@ -413,6 +437,14 @@ class MolLib(BaseLib):
         self.smiles = pd.Series(computed_lazy_dict['smiles'])
         self.fragments = FragLib(computed_lazy_dict=computed_lazy_dict['fragments'])
         self.embeddings = pd.Series(computed_lazy_dict['embeddings'])
+        self.peak_patterns = pd.Series()
+        if 'peak_patterns' in computed_lazy_dict:
+            if computed_lazy_dict['peak_patterns'] is not None:
+                self.peak_patterns = pd.Series(computed_lazy_dict['peak_patterns'])
+        self.loss_patterns = pd.Series()
+        if 'loss_patterns' in computed_lazy_dict:
+            if computed_lazy_dict['loss_patterns'] is not None:
+                self.loss_patterns = pd.Series(computed_lazy_dict['loss_patterns'])
     
     def __init__(
         self,
@@ -420,13 +452,33 @@ class MolLib(BaseLib):
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[np.ndarray,db.Bag,da.Array]] = {},
+        peak_patterns: Union[
+            List[
+                Dict[
+                    Hashable, # fragment name/id in ms2
+                    float # fragment m/z in ms2
+                ]
+            ],
+            db.Bag,
+            None,
+        ] = None,
+        loss_patterns: Union[
+            List[
+                Tuple[
+                    Dict[Hashable, float], # {delta name/id in ms2: delta m/z}
+                    List[List[Hashable]], # the sequence of loss pathways
+                ]
+            ],
+            db.Bag,
+            None,
+        ] = None,
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
         if smiles is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings)
+                lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings, peak_patterns, loss_patterns, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
@@ -465,6 +517,14 @@ class MolLib(BaseLib):
     @property
     def bad_index(self) -> pd.Index:
         return self.FragmentLib.bad_index
+    
+    @property
+    def PeakPatterns(self) -> pd.Series:
+        return self.peak_patterns
+    
+    @property
+    def LossPatterns(self) -> pd.Series:
+        return self.loss_patterns
     
     def mol_embedding(self, embedding_name: str) -> Optional[np.ndarray]:
         return self.embeddings.get(embedding_name, None)
@@ -559,6 +619,8 @@ class MolLib(BaseLib):
         new_lib.smiles = self.item_select(self.smiles,iloc)
         new_lib.fragments = self.item_select(self.fragments,iloc)
         new_lib.embeddings = self.item_select(self.embeddings,iloc)
+        new_lib.peak_patterns = self.item_select(self.peak_patterns,iloc)
+        new_lib.loss_patterns = self.item_select(self.loss_patterns,iloc)
         return new_lib
     
     @classmethod
@@ -582,6 +644,26 @@ class SpecLib(BaseLib):
         mol_RT: Union[List[Optional[float]],db.Bag,None] = None,
         mol_adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         mol_embeddings: Dict[str, Union[np.ndarray,da.Array]] = {},
+        peak_patterns: Union[
+            List[
+                Dict[
+                    Hashable, # fragment name/id in ms2
+                    float # fragment m/z in ms2
+                ]
+            ],
+            db.Bag,
+            None,
+        ] = None,
+        loss_patterns: Union[
+            List[
+                Tuple[
+                    Dict[Hashable, float], # {delta name/id in ms2: delta m/z}
+                    List[List[Hashable]], # the sequence of loss pathways
+                ]
+            ],
+            db.Bag,
+            None,
+        ] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
         Literal['PI', 'RT','mzs', 'intensities','spec_embeddings','mol_lib'],
@@ -600,7 +682,7 @@ class SpecLib(BaseLib):
             mzs = mzs.map(lambda x: np.array(x))
         if isinstance(intensities, db.Bag):
             intensities = intensities.map(lambda x: np.array(x))
-        mol_lib_lazy_dict = MolLib.lazy_init(smiles, mol_RT, mol_adducts, mol_embeddings, npartitions)
+        mol_lib_lazy_dict = MolLib.lazy_init(smiles, mol_RT, mol_adducts, mol_embeddings, peak_patterns, loss_patterns, npartitions)
         return {
             'PI': PI,
             'RT': RT,
@@ -635,7 +717,7 @@ class SpecLib(BaseLib):
         computed_lazy_dict: Optional[dict] = None,
     ):
         if not isinstance(computed_lazy_dict,dict):
-            lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings)
+            lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, num_workers)
             (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
         self.from_lazy(**computed_lazy_dict)
         
@@ -698,6 +780,14 @@ class SpecLib(BaseLib):
     @property
     def mol_formulas(self):
         return self.MolLib.Formulas
+    
+    @property
+    def PeakPatterns(self) -> pd.Series:
+        return self.MolLib.PeakPatterns
+    
+    @property
+    def LossPatterns(self) -> pd.Series:
+        return self.MolLib.LossPatterns
     
     def spec_embedding(self, embedding_name: str) -> Optional[np.ndarray]:
         return self.spec_embeddings.get(embedding_name, None)
