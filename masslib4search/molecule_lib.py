@@ -1,5 +1,6 @@
 from __future__ import annotations
-from .fragment_lib import FragLib,BaseLib
+from .mass_lib_utils import BaseLib,Molecules,Embeddings
+from .fragment_lib import FragLib
 from . import search_tools,base_tools
 import dask
 import dask.bag as db
@@ -30,22 +31,24 @@ class MolLib(BaseLib):
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[NDArray[np.float32],db.Bag,da.Array]] = {},
+        index:Union[pd.Index,Sequence[Hashable],None] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
-        Literal['smiles', 'embeddings', 'fragments', ],
-        Union[
-            db.Bag,
-            List[str], # Adducts
-            List[Optional[float]], #RT
-        ]
+        Literal['index', 'mols', 'embeddings', 'fragments',],
+        dict,
+        pd.Index,Sequence[Hashable],
+        None,
     ]:
+        mols_lazy_dict = Molecules.lazy_init(smiles, index=index, npartitions=npartitions)
+        embeddings_lazy_dict = Embeddings.lazy_init(embeddings, index=index, npartitions=npartitions)
         if not isinstance(smiles, db.Bag):
             smiles = db.from_sequence(smiles,npartitions=npartitions)
         formulas = smiles.map(lambda x: smiles2formula(x))
         frag_lib_lazy_dict = FragLib.lazy_init(formulas, RT, adducts, npartitions)
         return {
-            'smiles': smiles,
-            'embeddings': embeddings,
+            'index': index,
+            'mols': mols_lazy_dict,
+            'embeddings': embeddings_lazy_dict,
             'fragments': frag_lib_lazy_dict,
         }
         
@@ -53,13 +56,13 @@ class MolLib(BaseLib):
         self,
         **computed_lazy_dict
     ) -> None:
-        self.smiles = pd.Series(computed_lazy_dict['smiles'])
-        self.fragments = FragLib(computed_lazy_dict=computed_lazy_dict['fragments'])
-        self.embeddings = pd.Series(computed_lazy_dict['embeddings'])
-        self.peak_patterns = pd.Series()
-        if 'peak_patterns' in computed_lazy_dict:
-            if computed_lazy_dict['peak_patterns'] is not None:
-                self.peak_patterns = pd.Series(computed_lazy_dict['peak_patterns']).map(lambda x: np.array(x))
+        computed_lazy_dict['mols'] = Molecules(computed_lazy_dict=computed_lazy_dict['mols'])
+        computed_lazy_dict['fragments'] = FragLib(computed_lazy_dict=computed_lazy_dict['fragments'])
+        computed_lazy_dict['embeddings'] = Embeddings(computed_lazy_dict=computed_lazy_dict['embeddings'])
+        self.index = self.get_index(computed_lazy_dict)
+        self.molecules = computed_lazy_dict['mols']
+        self.fragments = computed_lazy_dict['fragments']
+        self.embeddings = computed_lazy_dict['embeddings']
     
     def __init__(
         self,
@@ -67,43 +70,24 @@ class MolLib(BaseLib):
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[NDArray[np.float32],db.Bag,da.Array]] = {},
-        peak_patterns: Union[
-            List[
-                Dict[
-                    Hashable, # fragment name/id in ms2
-                    float # fragment m/z in ms2
-                ]
-            ],
-            db.Bag,
-            None,
-        ] = None,
-        loss_patterns: Union[
-            List[
-                Tuple[
-                    Dict[Hashable, float], # {delta name/id in ms2: delta m/z}
-                    List[List[Hashable]], # the sequence of loss pathways
-                ]
-            ],
-            db.Bag,
-            None,
-        ] = None,
+        index:Union[pd.Index,Sequence[Hashable],None] = None,
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
         if smiles is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings, peak_patterns, loss_patterns, num_workers)
+                lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings, index, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
     @property
-    def index(self):
-        return self.SMILES.index
+    def Index(self):
+        return self.index
         
     @property
     def SMILES(self):
-        return self.smiles
+        return self.molecules.SMILES
     
     @property
     def FragmentLib(self) -> FragLib:
@@ -133,8 +117,12 @@ class MolLib(BaseLib):
     def bad_index(self) -> pd.Index:
         return self.FragmentLib.bad_index
     
-    def mol_embedding(self, embedding_name: str) -> Optional[np.ndarray]:
-        return self.embeddings.get(embedding_name, None)
+    def mol_embedding_array(
+        self,
+        embedding_name: str,
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
+    ) -> NDArray[np.float32]:
+        return self.embeddings.get_embedding_array(embedding_name,i_and_key)
     
     def search_embedding(
         self,
@@ -211,9 +199,7 @@ class MolLib(BaseLib):
             frag_indexs = mask.map(lambda x: np.argwhere(x).flatten())
             frag_indexs = frag_indexs.compute(scheduler='threads')
         
-        ref_embedding = self.mol_embedding(embedding_name)
-        if ref_embedding is None:
-            raise ValueError(f"No embedding named {embedding_name} found in MolLib")
+        ref_embedding = self.mol_embedding_array(embedding_name)
         
         print('Searching MolLib...')
         index,scores = search_tools.search_embeddings(
@@ -252,9 +238,10 @@ class MolLib(BaseLib):
     ) -> MolLib:
         iloc = self.format_selection(i_and_key)
         new_lib = MolLib()
-        new_lib.smiles = self.item_select(self.smiles,iloc)
-        new_lib.fragments = self.item_select(self.fragments,iloc)
-        new_lib.embeddings = self.item_select(self.embeddings,iloc)
+        new_lib.molecules = self.molecules.select(iloc)
+        new_lib.fragments = self.fragments.select(iloc)
+        new_lib.embeddings = self.embeddings.select(iloc)
+        new_lib.index = self.index[iloc]
         return new_lib
     
     @classmethod

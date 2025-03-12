@@ -31,13 +31,16 @@ class FragLib(BaseLib):
         formula: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
+        index:Union[pd.Index,Sequence[Hashable],None] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
-        Union[Literal['formula', 'RT', 'adducts'],str],
+        Union[Literal['index', 'formula', 'RT', 'adducts'],str],
         Union[
             db.Bag,
             List[str], # Adducts
             List[Optional[float]], #RT
+            pd.Index,Sequence[Hashable],
+            None,
         ]
     ]:
         if not isinstance(formula, db.Bag):
@@ -52,7 +55,7 @@ class FragLib(BaseLib):
             
         exact_masses = formula.map(lambda x: Fragment.from_formula_string(x).ExactMass if x is not None else None)
             
-        lazy_dict = {"formula": formula, 'adducts': adducts}
+        lazy_dict = {"index": index, "formula": formula, 'adducts': adducts}
         for adduct in adducts:
             predict_mz_func = partial(predict_adduct_mz, adduct)
             lazy_dict[str(adduct)] = exact_masses.map(predict_mz_func)
@@ -64,6 +67,7 @@ class FragLib(BaseLib):
         self,
         **computed_lazy_dict
     ) -> None:
+        self.index = self.get_index(computed_lazy_dict)
         self.fragments = {
             "formula": computed_lazy_dict["formula"],
         }
@@ -73,20 +77,21 @@ class FragLib(BaseLib):
             self.fragments[adduct_string] = computed_lazy_dict[adduct_string]
         if 'RT' in computed_lazy_dict:
             self.fragments['RT'] = computed_lazy_dict['RT']
-        self.fragments = pd.DataFrame(self.fragments)
+        self.fragments = pd.DataFrame(self.fragments,index=self.index)
 
     def __init__(
         self, 
         formula: Union[List[str],db.Bag,None] = None,
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
+        index:Union[pd.Index,Sequence[Hashable],None] = None,
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
         if formula is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(formula, RT, adducts, num_workers)
+                lazy_dict = self.lazy_init(formula, RT, adducts, index, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
@@ -111,8 +116,8 @@ class FragLib(BaseLib):
             self.Fragments[adduct_string] = adduct_mzs
     
     @property
-    def index(self):
-        return self.Fragments.index
+    def Index(self):
+        return self.index
     
     @property
     def Fragments(self) -> pd.DataFrame:
@@ -247,9 +252,9 @@ class FragLib(BaseLib):
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> FragLib:
         iloc = self.format_selection(i_and_key)
-        fragments_table = self.item_select(self.Fragments,iloc)
         new_lib = FragLib()
-        new_lib.fragments = fragments_table
+        new_lib.fragments = self.item_select(self.Fragments,iloc)
+        new_lib.index = self.Index[iloc]
         return new_lib
     
     @classmethod

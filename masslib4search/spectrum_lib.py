@@ -1,6 +1,7 @@
 from __future__ import annotations
 from . import base_tools,search_tools
-from .molecule_lib import MolLib,FragLib,BaseLib
+from .mass_lib_utils import BaseLib,Spectrums,Embeddings
+from .molecule_lib import MolLib,FragLib
 import dask
 import dask.bag as db
 import dask.array as da
@@ -8,28 +9,6 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
-
-def infer_precursors_table(
-    PI: Optional[List[float]] = None,
-    RT: Optional[List[float]] = None,
-) -> pd.DataFrame:
-    df = pd.DataFrame()
-    if PI is not None:
-        df['PI'] = PI
-    if RT is not None:
-        df['RT'] = RT
-    return df
-
-def infer_peaks_table(
-    mzs: Optional[List[List[float]]] = None,
-    intensities: Optional[List[List[float]]] = None,
-) -> pd.DataFrame:
-    df = pd.DataFrame()
-    if mzs is not None:
-        df['mzs'] = mzs
-    if intensities is not None:
-        df['intensities'] = intensities
-    return df
 
 class SpecLib(BaseLib):
     
@@ -44,51 +23,24 @@ class SpecLib(BaseLib):
         mol_RT: Union[List[Optional[float]],db.Bag,None] = None,
         mol_adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         mol_embeddings: Dict[str, Union[NDArray[np.float32],da.Array]] = {},
-        peak_patterns: Union[
-            List[
-                Dict[
-                    Hashable, # fragment name/id in ms2
-                    float # fragment m/z in ms2
-                ]
-            ],
-            db.Bag,
-            None,
-        ] = None,
-        loss_patterns: Union[
-            List[
-                Tuple[
-                    Dict[Hashable, float], # {delta name/id in ms2: delta m/z}
-                    List[List[Hashable]], # the sequence of loss pathways
-                ]
-            ],
-            db.Bag,
-            None,
-        ] = None,
+        index: Union[pd.Index,db.Bag,None] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
-        Literal['PI', 'RT','mzs', 'intensities','spec_embeddings','mol_lib'],
+        Literal['index', 'spec', 'spec_embeddings', 'mol_lib'],
         Union[
             db.Bag,
-            List[float], # PI, RT
-            List[List[float]], # mzs, intensities
-            dict, # spec_embeddings, mol_lib_lazy_dict
+            dict, # spec_embeddings, mol_lib_lazy_dict, spec
+            pd.Index,Sequence[Hashable], # index
+            None,
         ]
     ]:
-        if mzs is not None and not isinstance(mzs, db.Bag):
-            mzs = db.from_sequence(mzs,npartitions=npartitions)
-        if intensities is not None and not isinstance(intensities, db.Bag):
-            intensities = db.from_sequence(intensities,npartitions=npartitions)
-        if isinstance(mzs, db.Bag):
-            mzs = mzs.map(lambda x: np.array(x))
-        if isinstance(intensities, db.Bag):
-            intensities = intensities.map(lambda x: np.array(x))
-        mol_lib_lazy_dict = MolLib.lazy_init(smiles, mol_RT, mol_adducts, mol_embeddings, peak_patterns, loss_patterns, npartitions)
+        spec_lazy_dict = Spectrums.lazy_init(PI, RT, mzs, intensities, index=index, npartitions=npartitions)
+        spec_embdeddings_lazy_dict = Embeddings.lazy_init(spec_embeddings, index=index, npartitions=npartitions)
+        mol_lib_lazy_dict = MolLib.lazy_init(smiles, mol_RT, mol_adducts, mol_embeddings, index=index, npartitions=npartitions)
         return {
-            'PI': PI,
-            'RT': RT,
-            'mzs': mzs,
-            'intensities': intensities,
-            'spec_embeddings': spec_embeddings,
+            'index': index,
+            'spec': spec_lazy_dict,
+            'spec_embeddings': spec_embdeddings_lazy_dict,
             'mol_lib': mol_lib_lazy_dict,
         }
         
@@ -96,10 +48,13 @@ class SpecLib(BaseLib):
         self,
         **computed_lazy_dict
     ) -> None:
-        self.precursors = infer_precursors_table(computed_lazy_dict['PI'], computed_lazy_dict['RT'])
-        self.peaks = infer_peaks_table(computed_lazy_dict['mzs'], computed_lazy_dict['intensities'])
-        self.spec_embeddings = pd.Series(computed_lazy_dict['spec_embeddings'])
-        self.mols = MolLib(computed_lazy_dict=computed_lazy_dict['mol_lib'])
+        computed_lazy_dict['spec'] = Spectrums(computed_lazy_dict=computed_lazy_dict['spec'])
+        computed_lazy_dict['spec_embeddings'] = Embeddings(computed_lazy_dict=computed_lazy_dict['spec_embeddings'])
+        computed_lazy_dict['mol_lib'] = MolLib(computed_lazy_dict=computed_lazy_dict['mol_lib'])
+        self.index = self.get_index(computed_lazy_dict)
+        self.spectrums = computed_lazy_dict['spec']
+        self.spec_embeddings = computed_lazy_dict['spec_embeddings']
+        self.mol_lib = computed_lazy_dict['mol_lib']
     
     def __init__(
         self,
@@ -112,80 +67,73 @@ class SpecLib(BaseLib):
         mol_RT: Optional[List[Optional[float]]] = None,
         mol_adducts: Union[List[str],Literal['pos','neg']] = 'pos', # list of adducts for each SMILES string
         mol_embeddings: Dict[str, NDArray[np.float32]] = {}, # dict of embedding arrays, keyed by embedding name
+        index:Union[pd.Index,Sequence[Hashable],None] = None,
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
         if not isinstance(computed_lazy_dict,dict):
-            lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, num_workers)
+            lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, index, num_workers)
             (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
         self.from_lazy(**computed_lazy_dict)
         
-    def __len__(self):
-        return max(
-            len(self.precursors), 
-            len(self.peaks), 
-            len(self.mols),
-            self.spec_embeddings.apply(lambda x: len(x)).max(),
-        )
-        
     @property
     def PIs(self) -> Optional[pd.Series]:
-        return self.precursors.get('PI', None)
+        return self.spectrums.PIs
     
     @property
     def RTs(self) -> Optional[pd.Series]:
-        return self.precursors.get('RT', None)
+        return self.spectrums.RTs
     
     @property
-    def mzs(self) -> Optional[pd.Series]:
-        return self.peaks.get('mz', None)
+    def MZs(self) -> Optional[pd.Series]:
+        return self.spectrums.MZs
     
     @property
-    def intensities(self) -> Optional[pd.Series]:
-        return self.peaks.get('intensity', None)
-    
-    @property
-    def precursor_mzs(self) -> Optional[pd.Series]:
-        return self.precursors.get('mz', None)
-    
-    @property
-    def precursor_intensities(self) -> Optional[pd.Series]:
-        return self.precursors.get('intensity', None)
+    def Intens(self) -> Optional[pd.Series]:
+        return self.spectrums.Intens
     
     @property
     def MolLib(self) -> MolLib:
-        return self.mols
+        return self.mol_lib
     
     @property
     def FragmentLib(self) -> FragLib:
         return self.MolLib.FragmentLib
     
     @property
-    def mol_smiles(self) -> pd.Series:
+    def MolSMILES(self) -> pd.Series:
         return self.MolLib.SMILES
     
     @property
-    def mol_adducts(self):
+    def MolAdducts(self):
         return self.MolLib.Adducts
     
     @property
-    def mol_MZs(self):
+    def MolMZs(self):
         return self.MolLib.MZs
     
     @property
-    def mol_RTs(self):
+    def MolRTs(self):
         return self.MolLib.RTs
     
     @property
-    def mol_formulas(self):
+    def MolFormulas(self):
         return self.MolLib.Formulas
     
-    def spec_embedding(self, embedding_name: str) -> Optional[NDArray[np.float32]]:
-        return self.spec_embeddings.get(embedding_name, None)
+    def spec_embedding_array(
+        self, 
+        embedding_name: str,
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
+    ) -> NDArray[np.float32]:
+        return self.spec_embeddings.get_embedding_array(embedding_name, i_and_key)
     
-    def mol_embedding(self, embedding_name: str) -> Optional[NDArray[np.float32]]:
-        return self.mols.mol_embedding(embedding_name)
+    def mol_embedding_array(
+        self,
+        embedding_name: str,
+        i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
+    ) -> NDArray[np.float32]:
+        return self.MolLib.mol_embedding_array(embedding_name, i_and_key)
     
     def search_precursors_to_matrix(
         self,
@@ -195,9 +143,10 @@ class SpecLib(BaseLib):
         query_precursor_RTs: Optional[Union[da.Array, NDArray[np.float_]]] = None,
         precursor_RT_tolerance: float = 0.1,
     ) -> da.Array: # shape: (n_queries, n_formulas), dtype: bool
+        assert not isinstance(self.PIs,None), "If you want to search precursors, you need to provide PI values when you create the SpecLib."
         results = search_tools.search_precursors_to_matrix(
             query_precursor_mzs,
-            self.precursor_mzs.values,
+            self.PIs.values,
             precursor_mz_tolerance,
             precursor_mz_tolerance_type,
             query_precursor_RTs,
@@ -218,9 +167,10 @@ class SpecLib(BaseLib):
         List[List[int]], # List[List[ref_precursor_index]]
         Tuple[List[List[int]], NDArray[np.bool_]],
     ]:
+        assert not isinstance(self.PIs,None), "If you want to search precursors, you need to provide PI values when you create the SpecLib."
         results = search_tools.search_precursors(
             query_precursor_mzs,
-            self.precursor_mzs.values,
+            self.PIs.values,
             precursor_mz_tolerance,
             precursor_mz_tolerance_type,
             query_precursor_RTs,
@@ -298,7 +248,7 @@ class SpecLib(BaseLib):
             )
             map_adducts = True
             
-        if query_precursor_mzs is not None and len(self.precursors) > 0 and precursor_search_type =='spec':
+        if query_precursor_mzs is not None and len(self.spectrums) > 0 and precursor_search_type =='spec':
             bool_matrix = self.search_precursors_to_matrix(
                 query_precursor_mzs,
                 precursor_mz_tolerance,
@@ -314,9 +264,7 @@ class SpecLib(BaseLib):
             frag_indexs = mask.map(lambda x: np.argwhere(x).flatten())
             frag_indexs = frag_indexs.compute(scheduler='threads')
         
-        ref_embedding = self.spec_embedding(embedding_name)
-        if ref_embedding is None:
-            raise ValueError(f"No embedding named {embedding_name} found in SpecLib.")
+        ref_embedding = self.spec_embedding_array(embedding_name)
         
         print('Searching SpecLib...')
         index,scores = search_tools.search_embeddings(
@@ -328,7 +276,7 @@ class SpecLib(BaseLib):
         print('Decoding matrix to Smiles...')
         index_db = db.from_sequence(index)
         
-        smiles = index_db.map(lambda x: self.mol_smiles.values[x] if x is not None else None)
+        smiles = index_db.map(lambda x: self.MolSMILES.values[x] if x is not None else None)
         smiles = smiles.compute(scheduler='threads')
         results:Dict[str,np.ndarray] = {
             'index': index,
@@ -339,7 +287,7 @@ class SpecLib(BaseLib):
         if map_adducts is True:
             print('Decoding matrix to Fragments...')
             fragments = search_tools.decode_matrix_to_fragments(
-                formulas=self.mol_formulas,
+                formulas=self.MolFormulas,
                 adducts=pd.Series(adducts),
                 bool_matrix=bool_matrix,
                 select_list=index,
@@ -355,10 +303,10 @@ class SpecLib(BaseLib):
     ) -> SpecLib:
         iloc = self.format_selection(i_and_key)
         new_lib = SpecLib()
-        new_lib.precursors = self.item_select(self.precursors,iloc)
-        new_lib.peaks = self.item_select(self.peaks,iloc)
-        new_lib.spec_embeddings = self.item_select(self.spec_embeddings,iloc)
-        new_lib.mols = self.item_select(self.mols,iloc)
+        new_lib.spectrums = self.spectrums.select(iloc)
+        new_lib.spec_embeddings = self.spec_embeddings.select(iloc)
+        new_lib.mol_lib = self.mol_lib.select(iloc)
+        new_lib.index = self.index[iloc]
         return new_lib
     
     @classmethod
