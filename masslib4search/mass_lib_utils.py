@@ -37,6 +37,9 @@ class BaseLib(ABC):
                 return None
             case _:
                 assert len(item) == len(index), f"the len of {name} is {len(item)} but the len of index is {len(index)}"
+                if isinstance(item, np.ndarray):
+                    if len(item.shape) > 1:
+                        item = [arr for arr in item]
                 return pd.Series(item,index=index)
     
     @property
@@ -51,19 +54,18 @@ class BaseLib(ABC):
     
     def format_i_selection(
         self,
-        i: Union[int,slice,Sequence[int],None],
+        i: Union[int, slice, Sequence[int], None],
     ) -> List[int]:
-        match i:
-            case int():
-                return [i]
-            case slice():
-                return range(*i.indices(len(self)))
-            case Sequence():
-                return i
-            case None:
-                return []
-            case _:
-                raise TypeError(f"select index must be int, slice or sequence, not {type(i)}")
+        if isinstance(i, int):
+            return [i]
+        elif isinstance(i, slice):
+            return range(*i.indices(len(self)))
+        elif isinstance(i, Sequence):
+            return i
+        elif i is None:
+            return []
+        else:
+            raise TypeError(f"select index must be int, slice or sequence, not {type(i)}")
     
     def key2i(self, key: Sequence[Hashable]) -> List[int]:
         return list(self.Index.get_indexer_for(key))
@@ -72,15 +74,14 @@ class BaseLib(ABC):
         self,
         key: Union[Hashable,Sequence[Hashable],None], 
     ) -> List[int]:
-        match key:
-            case Hashable():
-                return self.key2i([key])
-            case Sequence():
-                return self.key2i(key)
-            case None:
-                return []
-            case _:
-                raise TypeError(f"select key must be hashable or sequence, not {type(key)}")
+        if isinstance(key, Hashable):
+            return self.key2i([key])
+        elif isinstance(key, Sequence):
+            return self.key2i(key)
+        elif key is None:
+            return []
+        else:
+            raise TypeError(f"select key must be hashable or sequence, not {type(key)}")
             
     def format_bool_selection(
         self,
@@ -93,16 +94,15 @@ class BaseLib(ABC):
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]],
     ) -> List[int]:
         iloc = []
-        match i_and_key:
-            case int() | slice() | Sequence() if not isinstance(i_and_key, tuple):
-                iloc.extend(self.format_i_selection(i_and_key))
-            case tuple():
-                if len(i_and_key) >= 1:
-                    iloc.extend(self.format_i_selection(i_and_key[0]))
-                if len(i_and_key) >= 2:
-                    iloc.extend(self.format_key_selection(i_and_key[1]))
-                if len(i_and_key) >= 3:
-                    iloc.extend(self.format_bool_selection(i_and_key[2]))
+        if isinstance(i_and_key, tuple):
+            if len(i_and_key) >= 1:
+                iloc.extend(self.format_i_selection(i_and_key[0]))
+            if len(i_and_key) >= 2:
+                iloc.extend(self.format_key_selection(i_and_key[1]))
+            if len(i_and_key) >= 3:
+                iloc.extend(self.format_bool_selection(i_and_key[2]))
+        else:
+            iloc.extend(self.format_i_selection(i_and_key))
         return iloc
     
     def item_select(
@@ -128,9 +128,9 @@ class BaseLib(ABC):
                         if hasattr(item, "__getitem__"):
                             return item[iloc]
                         else:
-                            raise TypeError(f"item must be a splitable object, not {type(item)}")
+                            return item
         else:
-            raise TypeError(f"item must be a lengthable object, not {type(item)}")
+            return item
     
     @abstractmethod
     def select(
@@ -249,6 +249,8 @@ class Spectrums(BaseLib):
         self,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> Spectrums:
+        if self.is_empty:
+            return self.__class__()
         iloc = self.format_selection(i_and_key)
         new_spectrums = Spectrums()
         new_spectrums.precursor_mzs = self.item_select(self.precursor_mzs, iloc)
@@ -329,6 +331,8 @@ class Molecules(BaseLib):
         self,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> Molecules:
+        if self.is_empty:
+            return self.__class__()
         iloc = self.format_selection(i_and_key)
         new_molecules = Molecules()
         new_molecules.smiles = self.item_select(self.smiles, iloc)
@@ -394,6 +398,8 @@ class Embeddings(BaseLib):
         self,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> Embeddings:
+        if self.is_empty:
+            return self.__class__()
         iloc = self.format_selection(i_and_key)
         new_embeddings = Embeddings()
         for name in self.__dict__:

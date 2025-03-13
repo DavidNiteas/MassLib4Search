@@ -72,10 +72,18 @@ class SpecLib(BaseLib):
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
-        if not isinstance(computed_lazy_dict,dict):
-            lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, index, num_workers)
-            (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
-        self.from_lazy(**computed_lazy_dict)
+        if not \
+            (all(x is None for x in [PI, RT, mzs, intensities, smiles, mol_RT, index, computed_lazy_dict]) \
+            and all(len(x) == 0 for x in [spec_embeddings, mol_embeddings])):
+                
+            if not isinstance(computed_lazy_dict,dict):
+                lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, index, num_workers)
+                (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
+            self.from_lazy(**computed_lazy_dict)
+        
+    @property
+    def Index(self):
+        return self.index
         
     @property
     def PIs(self) -> Optional[pd.Series]:
@@ -195,18 +203,79 @@ class SpecLib(BaseLib):
         batch_size: int = 10,
     ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
         
-        pass
+        if search_type == 'mol':
+            
+            fragment_results = self.search_fragments(
+                                    query_mzs,
+                                    adducts,
+                                    mz_tolerance,
+                                    mz_tolerance_type,
+                                    query_RTs,
+                                    RT_tolerance,
+                                    adduct_co_occurrence_threshold,
+                                    batch_size
+            )
+        
+        else:
+            
+            fragment_results = self.search_fragments(
+                                    query_mzs,
+                                    adducts,
+                                    mz_tolerance,
+                                    mz_tolerance_type,
+                                    query_RTs,
+                                    RT_tolerance,
+                                    adduct_co_occurrence_threshold,
+                                    batch_size
+            )
+            
+        if fragment_results is None:
+            tag_ref_index = None
+        else:
+            tag_ref_index = fragment_results['db_index']
+            
+        ref_embedding = self.get_spec_embedding(embedding_name)
+        embedding_results = search_tools.search_embeddings(
+            query_embedding,ref_embedding,tag_ref_index,top_k
+        )
+        
+        print('Merging results...')
+        qry_index_bag = db.from_sequence(embedding_results.index,partition_size=1)
+        smiles_bag = qry_index_bag.map(lambda x: self.MolLib.SMILES[embedding_results.loc[x,'db_index']].values if not isinstance(embedding_results.loc[x,'db_index'],str) else 'null')
+        if fragment_results is not None:
+            
+            def get_sub_index(x: Hashable) -> Tuple[Hashable,Union[NDArray[np.int64],Literal['null']]]:
+                embedding_tag_index:NDArray[np.int64] = embedding_results.loc[x,'db_index']
+                fragment_tag_index:NDArray[np.int64] = fragment_results.loc[x,'db_index']
+                if isinstance(embedding_tag_index, np.ndarray) and isinstance(fragment_tag_index, np.ndarray):
+                    return x,np.where(embedding_tag_index[:,np.newaxis] == fragment_tag_index[np.newaxis,:])[1]
+                else:
+                    return x,'null'
+                
+            db_index_iloc_bag = qry_index_bag.map(get_sub_index)
+            formula_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'formula'][x[1]] if not isinstance(x[1],str) else 'null')
+            adduct_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'adduct'][x[1]] if not isinstance(x[1],str) else 'null')
+
+        else:
+            formula_bag = None
+            adduct_bag = None
+        
+        smiles,formula,adduct = dask.compute(smiles_bag,formula_bag,adduct_bag,scheduler='threads')
+        
+        return pd.DataFrame({'db_index': embedding_results['db_index'].tolist(), 'smiles': smiles, 'score': embedding_results['score'].tolist(), 'formula': formula, 'adduct': adduct},index=query_embedding.index)
     
     def select(
         self, 
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> SpecLib:
+        if self.is_empty:
+            return self.__class__()
         iloc = self.format_selection(i_and_key)
         new_lib = SpecLib()
-        new_lib.spectrums = self.spectrums.select(iloc)
-        new_lib.spec_embeddings = self.spec_embeddings.select(iloc)
-        new_lib.mol_lib = self.mol_lib.select(iloc)
-        new_lib.index = self.index[iloc]
+        new_lib.spectrums = self.item_select(self.spectrums,iloc)
+        new_lib.spec_embeddings = self.item_select(self.spec_embeddings,iloc)
+        new_lib.mol_lib = self.item_select(self.mol_lib,iloc)
+        new_lib.index = self.Index[iloc]
         return new_lib
     
     @classmethod

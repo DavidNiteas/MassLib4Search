@@ -184,6 +184,8 @@ class FragLib(BaseLib):
         self, 
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> FragLib:
+        if self.is_empty:
+            return self.__class__()
         iloc = self.format_selection(i_and_key)
         new_lib = FragLib()
         new_lib.fragments = self.item_select(self.Fragments,iloc)

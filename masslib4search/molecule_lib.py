@@ -75,7 +75,7 @@ class MolLib(BaseLib):
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
-        if smiles is not None or computed_lazy_dict is not None:
+        if not (all(x is None for x in [smiles,RT,index,computed_lazy_dict]) and len(embeddings) == 0):
             if not isinstance(computed_lazy_dict, dict):
                 lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings, index, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
@@ -165,14 +165,14 @@ class MolLib(BaseLib):
     ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
         
         fragment_results = self.search_fragments(
-            query_mzs,
-            adducts,
-            mz_tolerance,
-            mz_tolerance_type,
-            query_RTs,
-            RT_tolerance,
-            adduct_co_occurrence_threshold,
-            batch_size
+                                query_mzs,
+                                adducts,
+                                mz_tolerance,
+                                mz_tolerance_type,
+                                query_RTs,
+                                RT_tolerance,
+                                adduct_co_occurrence_threshold,
+                                batch_size
         )
         if fragment_results is None:
             tag_ref_index = None
@@ -185,7 +185,7 @@ class MolLib(BaseLib):
         
         print('Merging results...')
         qry_index_bag = db.from_sequence(embedding_results.index,partition_size=1)
-        smiles_bag = qry_index_bag.map(lambda x: self.molecules.SMILES[embedding_results.loc[x,'db_index']].values)
+        smiles_bag = qry_index_bag.map(lambda x: self.molecules.SMILES[embedding_results.loc[x,'db_index']].values if not isinstance(embedding_results.loc[x,'db_index'],str) else 'null')
         if fragment_results is not None:
             
             def get_sub_index(x: Hashable) -> Tuple[Hashable,Union[NDArray[np.int64],Literal['null']]]:
@@ -197,8 +197,8 @@ class MolLib(BaseLib):
                     return x,'null'
                 
             db_index_iloc_bag = qry_index_bag.map(get_sub_index)
-            formula_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'formula'][x[1]] if x[1] != 'null' else 'null')
-            adduct_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'adduct'][x[1]] if x[1] != 'null' else 'null')
+            formula_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'formula'][x[1]] if not isinstance(x[1],str) else 'null')
+            adduct_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'adduct'][x[1]] if not isinstance(x[1],str) else 'null')
 
         else:
             formula_bag = None
@@ -212,12 +212,14 @@ class MolLib(BaseLib):
         self, 
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> MolLib:
+        if self.is_empty:
+            return self.__class__()
         iloc = self.format_selection(i_and_key)
         new_lib = MolLib()
-        new_lib.molecules = self.molecules.select(iloc)
-        new_lib.fragments = self.fragments.select(iloc)
-        new_lib.embeddings = self.embeddings.select(iloc)
-        new_lib.index = self.index[iloc]
+        new_lib.molecules = self.item_select(self.molecules, iloc)
+        new_lib.fragments = self.item_select(self.fragments, iloc)
+        new_lib.embeddings = self.item_select(self.embeddings, iloc)
+        new_lib.index = self.Index[iloc]
         return new_lib
     
     @classmethod

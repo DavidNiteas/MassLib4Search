@@ -178,25 +178,30 @@ def cosine_similarity_np(
 def deocde_index_and_score(
     score_matrix: Union[
         NDArray[np.float32],  # shape: (n_query_items, n_ref_items)
-        List[NDArray[np.float32]],  # len: n_query_items, each element shape: (n_ref_items,)
+        List[Union[NDArray[np.float32],Literal['null']]],  # len: n_query_items, each element shape: (n_ref_items,)
     ],
     top_k: Optional[int] = None,
 ) -> Tuple[
-        List[Optional[NDArray[np.int_]]],  # index of tag ref, len: n_query_items, each element shape: (top_k,)
-        List[Optional[NDArray[np.float32]]], # score of tag ref, len: n_query_items, each element shape: (top_k,)
+        List[Union[NDArray[np.int_],Literal['null']]],  # index of tag ref, len: n_query_items, each element shape: (top_k,)
+        List[Union[NDArray[np.float32],Literal['null']]], # score of tag ref, len: n_query_items, each element shape: (top_k,)
 ]:
     
     score_db = db.from_sequence(score_matrix)
     
-    def decoder(score_vector:Optional[NDArray[np.float32]]) -> Tuple[NDArray[np.int_], NDArray[np.float32]]:
-        if score_vector is not None:
+    def decoder(
+        score_vector:Union[NDArray[np.float32],Literal['null']]
+    ) -> Tuple[
+        Union[NDArray[np.int_],Literal['null']], 
+        Union[NDArray[np.float32],Literal['null']],
+    ]:
+        if not isinstance(score_vector, str):
             if top_k is None:
                 I = np.argsort(score_vector)[::-1]
             else:
                 I = np.argsort(score_vector)[::-1][:top_k]
             S = score_vector[I]
         else:
-            I,S = None,None
+            I,S = 'null','null'
         return I, S
     
     IS_pairs = score_db.map(decoder)
@@ -225,9 +230,9 @@ def search_embeddings(
         print('Initializing embeddings...')
         score_matrix = db.from_sequence(zip(qry_embeddings,tag_ref_index),partition_size=1)
         
-        def score_func(item: Tuple[NDArray,Union[NDArray,Literal['null']]]) -> Optional[NDArray]:
+        def score_func(item: Tuple[NDArray,Union[NDArray,Literal['null']]]) -> Union[NDArray,Literal['null']]:
             query_vector, ref_index = item
-            if len(ref_index) == 0:
+            if len(ref_index) == 0 or isinstance(ref_index, str):
                 return 'null'
             ref_vector = np.stack(ref_embeddings[ref_index])
             score_vector = cosine_similarity_np(query_vector, ref_vector)
@@ -241,7 +246,7 @@ def search_embeddings(
     I,S = deocde_index_and_score(score_matrix, top_k)
     if tag_ref_index is not None:
         for i in range(len(I)):
-            if I[i] is not None:
+            if not isinstance(I[i], str):
                 I[i] = tag_ref_index[i][I[i]]
     return pd.DataFrame({'db_index': I,'score': S},index=qry_embeddings.index)
 
