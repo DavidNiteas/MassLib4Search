@@ -117,120 +117,96 @@ class MolLib(BaseLib):
     def bad_index(self) -> pd.Index:
         return self.FragmentLib.bad_index
     
-    def mol_embedding_array(
+    def get_embedding(
         self,
         embedding_name: str,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
-    ) -> NDArray[np.float32]:
-        return self.embeddings.get_embedding_array(embedding_name,i_and_key)
+    ) -> pd.Series:
+        return self.embeddings.get_embedding(embedding_name,i_and_key)
+    
+    def search_fragments(
+        self,
+        query_mzs: pd.Series,  # Series[float], shape: (n_ions,)
+        adducts: Union[List[str], Literal['all_adducts', 'no_adducts']] = 'all_adducts',  # 加合物选择模式，'all_adducts' 表示考虑所有加合物（不包括 [M]），'no_adducts' 表示只考虑 [M]
+        mz_tolerance: float = 3,  
+        mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+        query_RTs: Optional[NDArray[np.float_]] = None,
+        RT_tolerance: float = 0.1,
+        adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
+        batch_size: int = 10,
+    ) -> Optional[pd.DataFrame]:
+        if self.FragmentLib.is_empty or query_mzs is None:
+            return None
+        else:
+            return self.FragmentLib.search_fragments(
+                query_mzs,
+                adducts,
+                mz_tolerance,  
+                mz_tolerance_type,
+                query_RTs,
+                RT_tolerance,
+                adduct_co_occurrence_threshold,  
+                batch_size,
+            )
     
     def search_embedding(
         self,
         embedding_name: str,
-        query_embedding: Union[NDArray[np.float32],da.Array], # shape: (n_queries, embedding_dim)
-        query_mzs: Union[NDArray[np.float_],da.Array,None] = None, # shape: (n_ions,)
+        query_embedding: pd.Series, # shape: (n_queries, embedding_dim)
+        query_mzs: pd.Series = None, # shape: (n_ions,)
         adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
         mz_tolerance: float = 3,
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Union[NDArray[np.float_],da.Array,None] = None,
+        query_RTs: Optional[NDArray[np.float_]] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
-    ) -> Dict[
-        Literal['index','smiles','score','formula','adduct'],
-        Union[
-            List[NDArray[np.int_]], # index of hits
-            List[NDArray[np.str_]], # smiles/formula/adduct of hits
-            List[NDArray[np.float_]], # scores of hits
-        ]
-    ]:
-        '''
-        根据给定的嵌入名称和查询嵌入，在分子库中搜索与查询离子匹配的分子。匹配基于质荷比(mz)和保留时间(RT)的容差值。
-        函数可以返回匹配项的索引、smiles、分数，以及可选的匹配项的formula和adduct。
-
-        参数:
-        - embedding_name: 要使用的嵌入名称。
-        - query_embedding: 查询嵌入的数组，可以是numpy数组或dask数组，形状为(n_queries, embedding_dim)。
-        - query_mzs: 查询离子的质荷比数组，可以是numpy数组或dask数组，形状为(n_ions,)，可选。
-        - adducts: 要考虑的加成型列表或字符串，字符串可以是'all_adducts'或'no_adducts'，可选。
-        - mz_tolerance: 质荷比容差值，默认为3。
-        - mz_tolerance_type: 质荷比容差类型，默认为'ppm'。
-        - query_RTs: 查询离子的保留时间数组，可以是numpy数组或dask数组，形状为(n_ions,)，可选。
-        - RT_tolerance: 保留时间容差值，默认为0.1分钟。
-        - adduct_co_occurrence_threshold: 如果某个公式的共现加成型少于这个阈值，则从结果中移除该公式，默认为1。
-        - top_k: 对于每个查询返回的匹配项数量，默认为5。
-
-        返回值:
-        - 一个字典，包含匹配项的索引、smiles、分数，以及可选的formula和adduct。
-        - 字典中的键:
-            - 'index': 匹配项的索引，列表长度为查询项数量，每个元素为一个numpy数组，形状为(tag_formula_num,)。
-            - 'smiles': 匹配项的smiles，列表长度为查询项数量，每个元素为一个numpy数组，形状为(tag_formula_num,)。
-            - 'score': 匹配项的分数，列表长度为查询项数量，每个元素为一个numpy数组，形状为(tag_formula_num,)。
-            - 'formula': 匹配项的formula，仅在map_adducts为True时返回，列表长度为查询项数量，每个元素为一个numpy数组，形状为(tag_formula_num,)。
-            - 'adduct': 匹配项的adduct，仅在map_adducts为True时返回，列表长度为查询项数量，每个元素为一个numpy数组，形状为(tag_formula_num,)。
-        '''
+        batch_size: int = 10,
+    ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
         
-        bool_matrix = None
-        mask = None
-        map_adducts = False
-        
-        if query_mzs is not None:
-            
-            if isinstance(adducts, str):
-                if adducts == 'all_adducts':
-                    adducts = self.Adducts
-                elif adducts == 'no_adducts':
-                    adducts = ['[M]']
-            
-            bool_matrix = self.FragmentLib.search_to_matrix(
-                query_mzs,adducts,
-                mz_tolerance,mz_tolerance_type,
-                query_RTs,RT_tolerance,
-                adduct_co_occurrence_threshold,
-            )
-            map_adducts = True
-            
-        if bool_matrix is not None:
-            mask = da.sum(bool_matrix, axis=-1) > 0
-            print('Searching Precursors...')
-            bool_matrix,mask = dask.compute(bool_matrix,mask)
-            print('Decoding hit matrix to indices...')
-            mask = db.from_sequence(mask,partition_size=1)
-            frag_indexs = mask.map(lambda x: np.argwhere(x).flatten())
-            frag_indexs = frag_indexs.compute(scheduler='threads')
-        
-        ref_embedding = self.mol_embedding_array(embedding_name)
-        
-        print('Searching MolLib...')
-        index,scores = search_tools.search_embeddings(
-            query_embedding,
-            ref_embedding,
-            mask,top_k,
+        fragment_results = self.search_fragments(
+            query_mzs,
+            adducts,
+            mz_tolerance,
+            mz_tolerance_type,
+            query_RTs,
+            RT_tolerance,
+            adduct_co_occurrence_threshold,
+            batch_size
+        )
+        if fragment_results is None:
+            tag_ref_index = None
+        else:
+            tag_ref_index = fragment_results['db_index']
+        ref_embedding = self.get_embedding(embedding_name)
+        embedding_results = search_tools.search_embeddings(
+            query_embedding,ref_embedding,tag_ref_index,top_k
         )
         
-        print('Decoding matrix to Smiles...')
-        index_db = db.from_sequence(index)
-        
-        smiles = index_db.map(lambda x: self.SMILES.values[x] if x is not None else None)
-        smiles = smiles.compute(scheduler='threads')
-        results:Dict[str,np.ndarray] = {
-            'index': index,
-            'smiles': smiles,
-            'score': scores,
-        }
-        
-        if map_adducts is True:
-            print('Decoding matrix to Fragments...')
-            fragments = search_tools.decode_matrix_to_fragments(
-                formulas=self.SMILES,
-                adducts=pd.Series(adducts),
-                bool_matrix=bool_matrix,
-                select_list=index,
-            )
-            results['formula'] = fragments['formula']
-            results['adduct'] = fragments['adduct']
+        print('Merging results...')
+        qry_index_bag = db.from_sequence(embedding_results.index,partition_size=1)
+        smiles_bag = qry_index_bag.map(lambda x: self.molecules.SMILES[embedding_results.loc[x,'db_index']].values)
+        if fragment_results is not None:
             
-        return results
+            def get_sub_index(x: Hashable) -> Tuple[Hashable,Union[NDArray[np.int64],Literal['null']]]:
+                embedding_tag_index:NDArray[np.int64] = embedding_results.loc[x,'db_index']
+                fragment_tag_index:NDArray[np.int64] = fragment_results.loc[x,'db_index']
+                if isinstance(embedding_tag_index, np.ndarray) and isinstance(fragment_tag_index, np.ndarray):
+                    return x,np.where(embedding_tag_index[:,np.newaxis] == fragment_tag_index[np.newaxis,:])[1]
+                else:
+                    return x,'null'
+                
+            db_index_iloc_bag = qry_index_bag.map(get_sub_index)
+            formula_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'formula'][x[1]] if x[1] != 'null' else 'null')
+            adduct_bag = db_index_iloc_bag.map(lambda x: fragment_results.loc[x[0],'adduct'][x[1]] if x[1] != 'null' else 'null')
+
+        else:
+            formula_bag = None
+            adduct_bag = None
+        
+        smiles,formula,adduct = dask.compute(smiles_bag,formula_bag,adduct_bag,scheduler='threads')
+        
+        return pd.DataFrame({'db_index': embedding_results['db_index'].tolist(), 'smiles': smiles, 'score': embedding_results['score'].tolist(), 'formula': formula, 'adduct': adduct},index=query_embedding.index)
     
     def select(
         self, 

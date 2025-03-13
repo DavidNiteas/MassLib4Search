@@ -159,6 +159,10 @@ class BaseLib(ABC):
     def from_pickle(cls, path: str) -> BaseLib:
         return base_tools.load_pickle(path)
     
+    @property
+    def is_empty(self) -> bool:
+        return len(self) == 0
+    
 class Spectrums(BaseLib):
     
     @staticmethod
@@ -398,7 +402,7 @@ class Embeddings(BaseLib):
         new_embeddings.index = self.index[iloc]
         return new_embeddings
     
-    def get_embedding_array(
+    def get_embedding(
         self,
         embedding_name: str,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
@@ -406,7 +410,7 @@ class Embeddings(BaseLib):
         emb = getattr(self, embedding_name)
         if i_and_key is not None:
             emb = self.item_select(emb, self.format_selection(i_and_key))
-        return emb.values
+        return emb
     
     @classmethod
     def from_bytes(cls, data: bytes) -> Embeddings:

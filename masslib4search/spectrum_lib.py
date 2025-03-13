@@ -121,181 +121,81 @@ class SpecLib(BaseLib):
     def MolFormulas(self):
         return self.MolLib.Formulas
     
-    def spec_embedding_array(
+    def get_spec_embedding(
         self, 
         embedding_name: str,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
     ) -> NDArray[np.float32]:
-        return self.spec_embeddings.get_embedding_array(embedding_name, i_and_key)
+        return self.spec_embeddings.get_embedding(embedding_name, i_and_key)
     
-    def mol_embedding_array(
+    def get_mol_embedding(
         self,
         embedding_name: str,
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]],None] = None,
     ) -> NDArray[np.float32]:
-        return self.MolLib.mol_embedding_array(embedding_name, i_and_key)
+        return self.MolLib.get_embedding(embedding_name, i_and_key)
     
-    def search_precursors_to_matrix(
+    def search_fragments(
         self,
-        query_precursor_mzs: Union[da.Array, NDArray[np.float_]], # shape: (n_queries,)
-        precursor_mz_tolerance: float = 5,
-        precursor_mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_precursor_RTs: Optional[Union[da.Array, NDArray[np.float_]]] = None,
-        precursor_RT_tolerance: float = 0.1,
-    ) -> da.Array: # shape: (n_queries, n_formulas), dtype: bool
-        assert not isinstance(self.PIs,None), "If you want to search precursors, you need to provide PI values when you create the SpecLib."
-        results = search_tools.search_precursors_to_matrix(
-            query_precursor_mzs,
-            self.PIs.values,
-            precursor_mz_tolerance,
-            precursor_mz_tolerance_type,
-            query_precursor_RTs,
-            self.RTs.values,
-            precursor_RT_tolerance,
-        )
-        return results
-    
+        query_mzs: pd.Series,  # Series[float], shape: (n_ions,)
+        adducts: Union[List[str], Literal['all_adducts', 'no_adducts']] = 'all_adducts',  # 加合物选择模式，'all_adducts' 表示考虑所有加合物（不包括 [M]），'no_adducts' 表示只考虑 [M]
+        mz_tolerance: float = 3,  
+        mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+        query_RTs: Optional[NDArray[np.float_]] = None,
+        RT_tolerance: float = 0.1,
+        adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
+        batch_size: int = 10,
+    ) -> Optional[pd.DataFrame]:
+        if self.MolLib.is_empty or query_mzs is None:
+            return None
+        else:
+            return self.MolLib.search_fragments(
+                query_mzs,
+                adducts,
+                mz_tolerance,  
+                mz_tolerance_type,
+                query_RTs,
+                RT_tolerance,
+                adduct_co_occurrence_threshold,  
+                batch_size,
+            )
+            
     def search_precursors(
         self,
-        query_precursor_mzs: Union[da.Array, NDArray[np.float_]], # shape: (n_queries,)
-        precursor_mz_tolerance: float = 10,
-        precursor_mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_precursor_RTs: Optional[Union[da.Array, NDArray[np.float_]]] = None,
-        precursor_RT_tolerance: float = 0.1,
-        return_matrix: bool = False, # if True, return a matrix of shape (n_queries, n_formulas), dtype: bool, indicating which formulas are present for each query
-    ) -> Union[
-        List[List[int]], # List[List[ref_precursor_index]]
-        Tuple[List[List[int]], NDArray[np.bool_]],
-    ]:
-        assert not isinstance(self.PIs,None), "If you want to search precursors, you need to provide PI values when you create the SpecLib."
-        results = search_tools.search_precursors(
-            query_precursor_mzs,
-            self.PIs.values,
-            precursor_mz_tolerance,
-            precursor_mz_tolerance_type,
-            query_precursor_RTs,
-            self.RTs.values,
-            precursor_RT_tolerance,
-            return_matrix,
-        )
-        return results
+        query_mzs: pd.Series,  # Series[float], shape: (n_ions,)
+        mz_tolerance: float = 3,  
+        mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+        query_RTs: Optional[NDArray[np.float_]] = None,
+        RT_tolerance: float = 0.1,
+        batch_size: int = 10,
+    ) -> Optional[pd.DataFrame]:
+        if self.PIs is None or query_mzs is None:
+            return None
+        else:
+            return search_tools.search_precursors(
+                query_mzs,self.PIs,
+                mz_tolerance,mz_tolerance_type,
+                self.RTs,query_RTs,RT_tolerance,
+                batch_size
+            )
     
     def search_embedding(
         self,
         embedding_name: str,
-        query_embedding: Union[NDArray[np.float32],da.Array], # shape: (n_queries, embedding_dim)
-        query_precursor_mzs: Union[NDArray[np.float_],da.Array,None] = None, # shape: (n_queries,)
+        query_embedding: pd.Series, # shape: (n_queries, embedding_dim)
+        query_mzs: pd.Series = None, # shape: (n_queries,)
         adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
-        precursor_mz_tolerance: float = 10,
-        precursor_mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Union[NDArray[np.float_],da.Array,None] = None,
+        mz_tolerance: float = 3,
+        mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+        query_RTs: Optional[NDArray[np.float_]] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
-        precursor_search_type: Literal['mol', 'spec'] = 'mol',
-    ) -> Dict[
-        Literal['index','smiles','score','formula','adduct'],
-        Union[
-            List[NDArray[np.int_]], # index of hits
-            List[NDArray[np.str_]], # smiles/formula/adduct of hits
-            List[NDArray[np.float_]], # scores of hits
-        ]
-    ]:
-        """
-        在谱库中基于嵌入向量进行搜索，返回与查询嵌入向量最匹配的结果。
-
-        参数:
-        - embedding_name: str, 嵌入向量的名称。
-        - query_embedding: Union[NDArray[np.float32], da.Array], 查询嵌入向量，形状为 (n_queries, embedding_dim)。
-        - query_precursor_mzs: Union[NDArray[np.float_], da.Array, None], 查询前体离子的 m/z 值，形状为 (n_queries,)。
-        - adducts: Union[List[str], Literal['all_adducts', 'no_adducts']], 加合物列表或特定选项，默认为 'all_adducts'。
-        - precursor_mz_tolerance: float, 前体离子 m/z 的容差，默认为 10。
-        - precursor_mz_tolerance_type: Literal['ppm', 'Da'], 前体离子 m/z 容差的类型，默认为 'ppm'。
-        - query_RTs: Union[NDArray[np.float_], da.Array, None], 查询保留时间，形状为 (n_queries,)。
-        - RT_tolerance: float, 保留时间的容差，默认为 0.1。
-        - adduct_co_occurrence_threshold: int, 加合物共现阈值，默认为 1。
-        - top_k: int, 每个查询返回的命中数量，默认为 5。
-        - precursor_search_type: Literal['mol', 'spec'], 前体离子搜索类型，默认为 'mol'。
-
-        返回:
-        - Dict[
-            Literal['index', 'smiles', 'score', 'formula', 'adduct'],
-            Union[
-                List[NDArray[np.int_]],  # 命中结果的索引
-                List[NDArray[np.str_]],  # 命中结果的 SMILES 字符串、分子式或加合物
-                List[NDArray[np.float_]],  # 命中结果的分数
-            ]
-        ]: 返回一个字典，包含命中结果的索引、SMILES 字符串、分子式、加合物和分数。
-        """
+        search_type: Literal['mol', 'spec'] = 'mol',
+        batch_size: int = 10,
+    ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
         
-        bool_matrix = None
-        mask = None
-        map_adducts = False
-        
-        if query_precursor_mzs is not None and len(self.MolLib) > 0 and precursor_search_type == 'mol':
-            
-            if isinstance(adducts, str):
-                if adducts == 'all_adducts':
-                    adducts = self.MolLib.Adducts
-                elif adducts == 'no_adducts':
-                    adducts = ['[M]']
-            
-            bool_matrix = self.FragmentLib.search_to_matrix(
-                query_precursor_mzs,adducts,
-                precursor_mz_tolerance,precursor_mz_tolerance_type,
-                query_RTs,RT_tolerance,
-                adduct_co_occurrence_threshold,
-            )
-            map_adducts = True
-            
-        if query_precursor_mzs is not None and len(self.spectrums) > 0 and precursor_search_type =='spec':
-            bool_matrix = self.search_precursors_to_matrix(
-                query_precursor_mzs,
-                precursor_mz_tolerance,
-                precursor_mz_tolerance_type,
-            )
-            
-        if bool_matrix is not None:
-            mask = da.sum(bool_matrix, axis=-1) > 0
-            print('Searching Precursors...')
-            bool_matrix,mask = dask.compute(bool_matrix,mask)
-            print('Decoding hit matrix to indices...')
-            mask = db.from_sequence(mask,partition_size=1)
-            frag_indexs = mask.map(lambda x: np.argwhere(x).flatten())
-            frag_indexs = frag_indexs.compute(scheduler='threads')
-        
-        ref_embedding = self.spec_embedding_array(embedding_name)
-        
-        print('Searching SpecLib...')
-        index,scores = search_tools.search_embeddings(
-            query_embedding,
-            ref_embedding,
-            frag_indexs,top_k,
-        )
-
-        print('Decoding matrix to Smiles...')
-        index_db = db.from_sequence(index)
-        
-        smiles = index_db.map(lambda x: self.MolSMILES.values[x] if x is not None else None)
-        smiles = smiles.compute(scheduler='threads')
-        results:Dict[str,np.ndarray] = {
-            'index': index,
-            'smiles': smiles,
-            'score': scores,
-        }
-        
-        if map_adducts is True:
-            print('Decoding matrix to Fragments...')
-            fragments = search_tools.decode_matrix_to_fragments(
-                formulas=self.MolFormulas,
-                adducts=pd.Series(adducts),
-                bool_matrix=bool_matrix,
-                select_list=index,
-            )
-            results['formula'] = fragments['formula']
-            results['adduct'] = fragments['adduct']
-            
-        return results
+        pass
     
     def select(
         self, 
