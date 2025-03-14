@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from numpy.typing import NDArray,ArrayLike
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
-class BaseLib(ABC):
+class LibBase(ABC):
     
     @staticmethod
     def get_index(computed_lazy_dict:dict) -> Optional[pd.Index]:
@@ -122,13 +122,15 @@ class BaseLib(ABC):
                             return item.map(lambda x: self.item_select(x, iloc))
                     case np.ndarray():
                         return item[iloc]
-                    case BaseLib():
+                    case LibBase():
                         return item.select(iloc)
                     case _:
                         if hasattr(item, "__getitem__"):
                             return item[iloc]
                         else:
                             return item
+            else:
+                return item
         else:
             return item
     
@@ -136,34 +138,45 @@ class BaseLib(ABC):
     def select(
         self, 
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
-    ) -> BaseLib:
+    ) -> LibBase:
         pass
     
     def __getitem__(
         self, 
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
-    ) -> BaseLib:
+    ) -> LibBase:
         return self.select(i_and_key)
     
     def to_bytes(self) -> bytes:
         return base_tools.to_pickle_bytes(self)
     
     @classmethod
-    def from_bytes(cls, data: bytes) -> BaseLib:
+    def from_bytes(cls, data: bytes) -> LibBase:
         return base_tools.from_pickle_bytes(data)
     
     def to_pickle(self, path: str):
         base_tools.save_pickle(self, path)
     
     @classmethod
-    def from_pickle(cls, path: str) -> BaseLib:
+    def from_pickle(cls, path: str) -> LibBase:
         return base_tools.load_pickle(path)
     
     @property
     def is_empty(self) -> bool:
         return len(self) == 0
     
-class Spectrums(BaseLib):
+class BaseLibBlock(LibBase):
+    
+    @abstractmethod
+    def to_dataframe(self) -> pd.DataFrame:
+        pass
+    
+    @classmethod
+    @abstractmethod
+    def from_dataframe(dataframe: pd.DataFrame) -> BaseLibBlock:
+        pass
+    
+class Spectrums(BaseLibBlock):
     
     @staticmethod
     def lazy_init(
@@ -267,8 +280,31 @@ class Spectrums(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> Spectrums:
         return base_tools.load_pickle(path)
+    
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            'PI': self.precursor_mzs,
+            'RT': self.precursor_rts,
+            'mzs': self.spectrum_mzs,
+            'intensities': self.spectrum_intens,
+        },index=self.index)
         
-class Molecules(BaseLib):
+    @classmethod
+    def from_dataframe(cls, dataframe: pd.DataFrame) -> Spectrums:
+        spectrums = Spectrums()
+        if not dataframe.empty:
+            if 'PI' in dataframe.columns:
+                spectrums.precursor_mzs = dataframe['PI']
+            if 'RT' in dataframe.columns:
+                spectrums.precursor_rts = dataframe['RT']
+            if'mzs' in dataframe.columns:
+                spectrums.spectrum_mzs = dataframe['mzs']
+            if 'intensities' in dataframe.columns:
+                spectrums.spectrum_intens = dataframe['intensities']
+            spectrums.index = dataframe.index
+        return spectrums
+        
+class Molecules(BaseLibBlock):
     
     @staticmethod
     def lazy_init(
@@ -348,7 +384,24 @@ class Molecules(BaseLib):
     def from_pickle(cls, path: str) -> Molecules:
         return base_tools.load_pickle(path)
     
-class Embeddings(BaseLib):
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            'smiles': self.smiles,
+            'inchi': self.inchi,
+        },index=self.index)
+        
+    @classmethod
+    def from_dataframe(cls, dataframe: pd.DataFrame) -> Molecules:
+        molecules = Molecules()
+        if not dataframe.empty:
+            if'smiles' in dataframe.columns:
+                molecules.smiles = dataframe['smiles']
+            if 'inchi' in dataframe.columns:
+                molecules.inchi = dataframe['inchi']
+            molecules.index = dataframe.index
+        return molecules
+    
+class Embeddings(BaseLibBlock):
     
     @staticmethod
     def lazy_init(
@@ -425,3 +478,29 @@ class Embeddings(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> Embeddings:
         return base_tools.load_pickle(path)
+    
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            name: self.__dict__[name] for name in self.__dict__ if name != 'index'
+        },index=self.index)
+        
+    @classmethod
+    def from_dataframe(cls, dataframe: Optional[pd.DataFrame]) -> Embeddings:
+        embeddings = Embeddings()
+        if dataframe is not None:
+            if not dataframe.empty:
+                for name in dataframe.columns:
+                    embeddings.__dict__[name] = dataframe[name]
+                embeddings.index = dataframe.index
+        return embeddings
+    
+class BaseLib(LibBase):
+    
+    @abstractmethod
+    def to_dataframes(self) -> Dict[str,pd.DataFrame]:
+        pass
+    
+    @classmethod
+    @abstractmethod
+    def from_dataframes(cls, dataframes: Dict[str,pd.DataFrame]):
+        pass

@@ -32,14 +32,16 @@ class FragLib(BaseLib):
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         index:Union[pd.Index,Sequence[Hashable],None] = None,
+        metadatas: Optional[pd.DataFrame] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
         Union[Literal['index', 'formula', 'RT', 'adducts'],str],
         Union[
             db.Bag,
             List[str], # Adducts
-            List[Optional[float]], #RT
-            pd.Index,Sequence[Hashable],
+            List[Optional[float]], # RT
+            pd.Index,Sequence[Hashable], # index
+            pd.DataFrame, # metadatas
             None,
         ]
     ]:
@@ -55,7 +57,7 @@ class FragLib(BaseLib):
             
         exact_masses = formula.map(lambda x: Fragment.from_formula_string(x).ExactMass if x is not None else None)
             
-        lazy_dict = {"index": index, "formula": formula, 'adducts': adducts}
+        lazy_dict = {"index": index, "formula": formula, 'adducts': adducts, 'metadatas': metadatas}
         for adduct in adducts:
             predict_mz_func = partial(predict_adduct_mz, adduct)
             lazy_dict[str(adduct)] = exact_masses.map(predict_mz_func)
@@ -78,6 +80,7 @@ class FragLib(BaseLib):
         if 'RT' in computed_lazy_dict:
             self.fragments['RT'] = computed_lazy_dict['RT']
         self.fragments = pd.DataFrame(self.fragments,index=self.index)
+        self.metadatas = computed_lazy_dict.get('metadatas', None)
 
     def __init__(
         self, 
@@ -85,13 +88,14 @@ class FragLib(BaseLib):
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         index:Union[pd.Index,Sequence[Hashable],None] = None,
+        metadatas: Optional[pd.DataFrame] = None,
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
     ):
         if formula is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(formula, RT, adducts, index, num_workers)
+                lazy_dict = self.lazy_init(formula, RT, adducts, index, metadatas, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
@@ -143,6 +147,10 @@ class FragLib(BaseLib):
         return self.Fragments.get('RT', None)
     
     @property
+    def Metadatas(self) -> Optional[pd.DataFrame]:
+        return self.metadatas
+    
+    @property
     def bad_index(self) -> pd.Index:
         return self.index[self.Formulas.isna()]
         
@@ -189,6 +197,7 @@ class FragLib(BaseLib):
         iloc = self.format_selection(i_and_key)
         new_lib = FragLib()
         new_lib.fragments = self.item_select(self.Fragments,iloc)
+        new_lib.metadatas = self.item_select(self.Metadatas,iloc)
         new_lib.index = self.Index[iloc]
         return new_lib
     
@@ -199,3 +208,26 @@ class FragLib(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> FragLib:
         return base_tools.load_pickle(path)
+    
+    def to_dataframes(self) -> Dict[str,pd.DataFrame]:
+        dataframes = {
+            '/FragLib/index': pd.DataFrame({"index": self.Index},index=self.Index),
+            '/FragLib/fragments': self.Fragments,
+        }
+        if self.Metadatas is not None:
+            dataframes['/FragLib/metadatas'] = self.Metadatas
+        return dataframes
+    
+    @classmethod
+    def from_dataframes(cls, dataframes: Dict[str,pd.DataFrame]) -> FragLib:
+        new_lib = FragLib()
+        new_lib.metadatas = None
+        new_lib.index = None
+        new_lib.fragments = None
+        for key in dataframes:
+            if key.endswith('/FragLib/fragments'):
+                new_lib.fragments = dataframes[key]
+            elif key.endswith('/FragLib/metadatas'):
+                new_lib.metadatas = dataframes[key]
+            elif key.endswith('/FragLib/index'):
+                new_lib.index = dataframes[key].index

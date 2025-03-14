@@ -24,6 +24,7 @@ class SpecLib(BaseLib):
         mol_adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         mol_embeddings: Dict[str, Union[NDArray[np.float32],da.Array]] = {},
         index: Union[pd.Index,db.Bag,None] = None,
+        metadatas: Optional[pd.DataFrame] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
         Literal['index', 'spec', 'spec_embeddings', 'mol_lib'],
@@ -31,6 +32,7 @@ class SpecLib(BaseLib):
             db.Bag,
             dict, # spec_embeddings, mol_lib_lazy_dict, spec
             pd.Index,Sequence[Hashable], # index
+            pd.DataFrame, # metadatas
             None,
         ]
     ]:
@@ -42,6 +44,7 @@ class SpecLib(BaseLib):
             'spec': spec_lazy_dict,
             'spec_embeddings': spec_embdeddings_lazy_dict,
             'mol_lib': mol_lib_lazy_dict,
+            'metadatas': metadatas,
         }
         
     def from_lazy(
@@ -55,6 +58,7 @@ class SpecLib(BaseLib):
         self.spectrums = computed_lazy_dict['spec']
         self.spec_embeddings = computed_lazy_dict['spec_embeddings']
         self.mol_lib = computed_lazy_dict['mol_lib']
+        self.metadatas = computed_lazy_dict['metadatas']
     
     def __init__(
         self,
@@ -129,6 +133,10 @@ class SpecLib(BaseLib):
     def MolFormulas(self):
         return self.MolLib.Formulas
     
+    @property
+    def Metadatas(self) -> Optional[pd.DataFrame]:
+        return self.metadatas
+    
     def get_spec_embedding(
         self, 
         embedding_name: str,
@@ -201,7 +209,7 @@ class SpecLib(BaseLib):
         top_k: int = 5, # number of hits to return for each query
         search_type: Literal['mol', 'spec'] = 'mol',
         batch_size: int = 10,
-    ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
+    ) -> pd.DataFrame: # columns: db_ids, smiles, score, formula, adduct
         
         if search_type == 'mol':
             
@@ -232,7 +240,7 @@ class SpecLib(BaseLib):
         if fragment_results is None:
             tag_ref_index = None
         else:
-            tag_ref_index = fragment_results['db_index']
+            tag_ref_index = fragment_results['db_ids']
             
         ref_embedding = self.get_spec_embedding(embedding_name)
         embedding_results = search_tools.search_embeddings(
@@ -241,12 +249,12 @@ class SpecLib(BaseLib):
         
         print('Merging results...')
         qry_index_bag = db.from_sequence(embedding_results.index,partition_size=1)
-        smiles_bag = qry_index_bag.map(lambda x: self.MolLib.SMILES[embedding_results.loc[x,'db_index']].values if not isinstance(embedding_results.loc[x,'db_index'],str) else 'null')
+        smiles_bag = qry_index_bag.map(lambda x: self.MolLib.SMILES[embedding_results.loc[x,'db_ids']].values if not isinstance(embedding_results.loc[x,'db_ids'],str) else 'null')
         if fragment_results is not None:
             
             def get_sub_index(x: Hashable) -> Tuple[Hashable,Union[NDArray[np.int64],Literal['null']]]:
-                embedding_tag_index:NDArray[np.int64] = embedding_results.loc[x,'db_index']
-                fragment_tag_index:NDArray[np.int64] = fragment_results.loc[x,'db_index']
+                embedding_tag_index:NDArray[np.int64] = embedding_results.loc[x,'db_ids']
+                fragment_tag_index:NDArray[np.int64] = fragment_results.loc[x,'db_ids']
                 if isinstance(embedding_tag_index, np.ndarray) and isinstance(fragment_tag_index, np.ndarray):
                     return x,np.where(embedding_tag_index[:,np.newaxis] == fragment_tag_index[np.newaxis,:])[1]
                 else:
@@ -262,7 +270,7 @@ class SpecLib(BaseLib):
         
         smiles,formula,adduct = dask.compute(smiles_bag,formula_bag,adduct_bag,scheduler='threads')
         
-        return pd.DataFrame({'db_index': embedding_results['db_index'].tolist(), 'smiles': smiles, 'score': embedding_results['score'].tolist(), 'formula': formula, 'adduct': adduct},index=query_embedding.index)
+        return pd.DataFrame({'db_ids': embedding_results['db_ids'].tolist(), 'smiles': smiles, 'score': embedding_results['score'].tolist(), 'formula': formula, 'adduct': adduct},index=query_embedding.index)
     
     def select(
         self, 
@@ -275,6 +283,7 @@ class SpecLib(BaseLib):
         new_lib.spectrums = self.item_select(self.spectrums,iloc)
         new_lib.spec_embeddings = self.item_select(self.spec_embeddings,iloc)
         new_lib.mol_lib = self.item_select(self.mol_lib,iloc)
+        new_lib.metadatas = self.item_select(self.metadatas,iloc)
         new_lib.index = self.Index[iloc]
         return new_lib
     
@@ -285,3 +294,38 @@ class SpecLib(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> SpecLib:
         return base_tools.load_pickle(path)
+    
+    def to_dataframes(self) -> Dict[str, pd.DataFrame]:
+        dataframes = {
+            "/SpecLib/index": pd.DataFrame({"index": self.index},index=self.index),
+        }
+        if not self.spectrums.is_empty:
+            dataframes['/SpecLib/spectrums'] = self.spectrums.to_dataframe()
+        if not self.spec_embeddings.is_empty:
+            dataframes['/SpecLib/embeddings'] = self.spec_embeddings.to_dataframe()
+        if not self.mol_lib.is_empty:
+            mol_lib_dfs = self.mol_lib.to_dataframes()
+            for k,v in mol_lib_dfs.items():
+                dataframes[f'/SpecLib{k}'] = v
+        if self.metadatas is not None:
+            dataframes['/SpecLib/metadatas'] = self.metadatas
+        return dataframes
+    
+    @classmethod
+    def from_dataframes(cls, dataframes: Dict[str, pd.DataFrame]) -> SpecLib:
+        new_lib = SpecLib()
+        new_lib.index = None
+        new_lib.spectrums = None
+        new_lib.metadatas = None
+        new_lib.spec_embeddings = Embeddings()
+        new_lib.mol_lib = MolLib.from_dataframes(dataframes)
+        for key in dataframes:
+            if key.endswith('/SpecLib/index'):
+                new_lib.index = dataframes[key].index
+            elif key.endswith('/SpecLib/spectrums'):
+                new_lib.spectrums = Spectrums.from_dataframe(dataframes[key])
+            elif key.endswith('/SpecLib/embeddings'):
+                new_lib.spec_embeddings = Embeddings.from_dataframe(dataframes[key])
+            elif key.endswith('/SpecLib/metadatas'):
+                new_lib.metadatas = dataframes[key]
+        return new_lib

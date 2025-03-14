@@ -86,7 +86,7 @@ def search_fragments(
     tag_adduct_db = tag_index_db.map(lambda x: adducts[x[1]] if len(x[1]) > 0 else 'null')
     tag_index_db = tag_index_db.map(lambda x: ref_index_array[x[0]] if len(x[0]) > 0 else 'null')
     tag_db_index,tag_formula,tag_adduct = dask.compute(tag_index_db,tag_formula_db,tag_adduct_db,scheduler='threads')
-    return pd.DataFrame({'db_index': tag_db_index, 'formula': tag_formula, 'adduct': tag_adduct}, index=qry_index)
+    return pd.DataFrame({'db_ids': tag_db_index, 'formula': tag_formula, 'adduct': tag_adduct}, index=qry_index)
 
 def search_precursors(
     qry_ions: pd.Series, # shape: (n_ions,)
@@ -248,7 +248,7 @@ def search_embeddings(
         for i in range(len(I)):
             if not isinstance(I[i], str):
                 I[i] = tag_ref_index[i][I[i]]
-    return pd.DataFrame({'db_index': I,'score': S},index=qry_embeddings.index)
+    return pd.DataFrame({'db_ids': I,'score': S},index=qry_embeddings.index)
 
 @nb.njit
 def find_original_index_int(structure_vec:NDArray[np.int64], i_data:int) -> Tuple[int, int]:
@@ -358,7 +358,7 @@ def peak_pattern_search(
     def decode(
         pair_item: Tuple[IrregularArray, IrregularArray, pd.Series, pd.Series, NDArray[np.bool_]]
     ) -> Dict[
-        Literal['db_index', 'tag_peaks'],
+        Literal['db_ids', 'tag_peaks'],
         Union[List[Hashable], List[List[float]]],
     ]:
         qry_irr_array, ref_irr_array, qry_block, tag_refs, bm = pair_item
