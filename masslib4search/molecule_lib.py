@@ -170,6 +170,7 @@ class MolLib(BaseLib):
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
+        search_type: Literal['mol'] = 'mol', # MolLib only supports 'mol' search type
         batch_size: int = 10,
     ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
         
