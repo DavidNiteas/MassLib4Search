@@ -20,6 +20,9 @@ def search_fragments(
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
     batch_size: int = 10,
+    qry_chunks: int = 5120,
+    ref_chunks: int = 5120,
+    I_F_D_matrix_chunks: Tuple[int,int,int] = (10240, 10240, 5),
 ) -> pd.DataFrame: # columns: db_index, formula, adduct
     
     qry_index = qry_ions.index
@@ -32,9 +35,9 @@ def search_fragments(
     else:
         qry_bag = db.from_sequence(qry_blocks, partition_size=1)
     
-    ref_vec = da.from_array(ref_fragment_mzs.values, chunks=(5120, 1))[None,:,:]
+    ref_vec = da.from_array(ref_fragment_mzs.values, chunks=(ref_chunks, 1))[None,:,:]
     if ref_RTs is not None and query_RTs is not None:
-        ref_RT_vec = da.from_array(ref_RTs, chunks=5120)[None,:]
+        ref_RT_vec = da.from_array(ref_RTs, chunks=ref_chunks)[None,:]
     
     def get_IFD_matrix(
         qry_block: Union[NDArray[np.float_],Tuple[NDArray[np.float_],NDArray[np.float_]]],
@@ -42,19 +45,19 @@ def search_fragments(
         
         if isinstance(qry_block, tuple):
             qry_block, qry_RT_block = qry_block
-            qry_RT_block_vec = da.from_array(qry_RT_block, chunks=5120)[:, None]
+            qry_RT_block_vec = da.from_array(qry_RT_block, chunks=qry_chunks)[:, None]
         else:
             qry_RT_block = None
             
-        qry_block_vec = da.from_array(qry_block, chunks=5120)[:, None, None]
+        qry_block_vec = da.from_array(qry_block, chunks=qry_chunks)[:, None, None]
         d_matrix = da.abs(qry_block_vec - ref_vec)
         if mz_tolerance_type == 'ppm':
             d_matrix = d_matrix / ref_vec * 1e6
-        I_F_D_matrix = da.asarray(d_matrix <= mz_tolerance, chunks=(10240, 10240, 5))
+        I_F_D_matrix = da.asarray(d_matrix <= mz_tolerance, chunks=I_F_D_matrix_chunks)
         
         if qry_RT_block is not None:
             d_matrix_RT = da.abs(qry_RT_block_vec - ref_RT_vec)
-            bool_matrix_RT = da.asarray(d_matrix_RT <= RT_tolerance, chunks=(10240, 10240))
+            bool_matrix_RT = da.asarray(d_matrix_RT <= RT_tolerance, chunks=(I_F_D_matrix_chunks[0], I_F_D_matrix_chunks[1]))
             I_F_D_matrix = I_F_D_matrix & bool_matrix_RT[:, :, None]
         
         return I_F_D_matrix
@@ -69,7 +72,7 @@ def search_fragments(
     
     if adduct_co_occurrence_threshold > 1:
         print('Filtering adducts by co-occurrence...')
-        I_F_D_matrix = da.from_array(I_F_D_matrix, chunks=(10240, 10240, 5))
+        I_F_D_matrix = da.from_array(I_F_D_matrix, chunks=I_F_D_matrix_chunks)
         F_D_matrix = da.sum(I_F_D_matrix, axis=0, keepdims=False)
         F_matrix = da.sum(F_D_matrix, axis=1, keepdims=False)
         F_matrix = F_matrix >= adduct_co_occurrence_threshold
@@ -97,6 +100,9 @@ def search_precursors(
     query_RTs: Optional[NDArray[np.float_]] = None, # shape: (n_ions,)
     RT_tolerance: float = 0.1,
     batch_size: int = 10,
+    qry_chunks: int = 5120,
+    ref_chunks: int = 5120,
+    Q_R_matrix_chunks: Tuple[int,int] = (10240, 10240),
 ) -> pd.Series:
     
     qry_index = qry_ions.index
@@ -109,9 +115,9 @@ def search_precursors(
     else:
         qry_bag = db.from_sequence(qry_blocks, partition_size=1)
     
-    ref_vec = da.from_array(ref_precursor_mzs.values, chunks=5120)[None,:]
+    ref_vec = da.from_array(ref_precursor_mzs.values, chunks=ref_chunks)[None,:]
     if ref_RTs is not None and query_RTs is not None:
-        ref_RT_vec = da.from_array(ref_RTs, chunks=5120)[None,:]
+        ref_RT_vec = da.from_array(ref_RTs, chunks=ref_chunks)[None,:]
     
     def get_QR_matrix(
         qry_block: Union[NDArray[np.float_],Tuple[NDArray[np.float_],NDArray[np.float_]]],
@@ -119,19 +125,19 @@ def search_precursors(
         
         if isinstance(qry_block, tuple):
             qry_block, qry_RT_block = qry_block
-            qry_RT_block_vec = da.from_array(qry_RT_block, chunks=5120)[:, None]
+            qry_RT_block_vec = da.from_array(qry_RT_block, chunks=qry_chunks)[:, None]
         else:
             qry_RT_block = None
             
-        qry_block_vec = da.from_array(qry_block, chunks=5120)[:, None]
+        qry_block_vec = da.from_array(qry_block, chunks=qry_chunks)[:, None]
         d_matrix = da.abs(qry_block_vec - ref_vec)
         if mz_tolerance_type == 'ppm':
             d_matrix = d_matrix / ref_vec * 1e6
-        Q_R_matrix = da.asarray(d_matrix <= mz_tolerance,chunks=(10240, 10240))
+        Q_R_matrix = da.asarray(d_matrix <= mz_tolerance,chunks=Q_R_matrix_chunks)
         
         if qry_RT_block is not None:
             d_matrix_RT = da.abs(qry_RT_block_vec - ref_RT_vec)
-            bool_matrix_RT = da.asarray(d_matrix_RT <= RT_tolerance,chunks=(10240, 10240))
+            bool_matrix_RT = da.asarray(d_matrix_RT <= RT_tolerance,chunks=Q_R_matrix_chunks)
             Q_R_matrix = Q_R_matrix & bool_matrix_RT
         
         return Q_R_matrix
@@ -155,9 +161,11 @@ def search_precursors(
 def cosine_similarity_dask(
     query_embeddings: Union[da.Array, NDArray[np.float32]], # shape: (n_query_items, n_dim)
     ref_embeddings: Union[da.Array, NDArray[np.float32]], # shape: (n_ref_items, n_dim)
+    query_chunks: int = 5120,
+    ref_chunks: int = 5120,
 ) -> da.Array: # shape: (n_query_items, n_ref_items)
-    query_embeddings = da.asarray(query_embeddings, chunks=(5120, -1))
-    ref_embeddings = da.asarray(ref_embeddings, chunks=(5120, -1))
+    query_embeddings = da.asarray(query_embeddings, chunks=(query_chunks, -1))
+    ref_embeddings = da.asarray(ref_embeddings, chunks=(ref_chunks, -1))
     dot_product = da.dot(query_embeddings, ref_embeddings.T)
     norm_query = da.linalg.norm(query_embeddings, axis=1, keepdims=True)
     norm_ref = da.linalg.norm(ref_embeddings, axis=1, keepdims=True)
@@ -221,10 +229,12 @@ def search_embeddings(
     ref_embeddings: pd.Series, # Series[1d-NDArray[np.float_]]
     tag_ref_index: Optional[pd.Series] = None, # Series[1d-NDArray[Hashable] | 'null']
     top_k: Optional[int] = None,
+    qry_chunks: int = 5120,
+    ref_chunks: int = 5120
 ) -> pd.DataFrame: # columns: db_index, score
     if tag_ref_index is None:
         print('Calculating score matrix...')
-        score_matrix = cosine_similarity_dask(np.stack(qry_embeddings), np.stack(ref_embeddings))
+        score_matrix = cosine_similarity_dask(np.stack(qry_embeddings), np.stack(ref_embeddings), qry_chunks, ref_chunks)
         score_matrix = score_matrix.compute(scheduler='threads')
     else:
         print('Initializing embeddings...')
@@ -305,6 +315,9 @@ def peak_pattern_search(
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
     batch_size: int = 10,
+    qry_chunks: int = 5120,
+    ref_chunks: int = 5120,
+    bm_chunks: Tuple[int,int] = (10240, 10240),
 ) -> pd.DataFrame: # columns: db_index, tag_peaks
     
     qry_blocks = np.array_split(qry_series,batch_size)
@@ -332,15 +345,15 @@ def peak_pattern_search(
     ) -> Tuple[IrregularArray, IrregularArray, pd.Series, pd.Series, da.Array]:
         qry_irr_array, ref_irr_array, qry_block, tag_refs = pair_item
         
-        qry_vec = da.from_array(qry_irr_array.data_vector, chunks=5120).reshape(-1,1)
-        ref_vec = da.from_array(ref_irr_array.data_vector, chunks=5120).reshape(1,-1)
+        qry_vec = da.from_array(qry_irr_array.data_vector, chunks=qry_chunks).reshape(-1,1)
+        ref_vec = da.from_array(ref_irr_array.data_vector, chunks=ref_chunks).reshape(1,-1)
         
         if mz_tolerance_type == 'ppm':
             dm = da.abs(qry_vec - ref_vec) / ref_vec * 1e6
         else:
             dm = da.abs(qry_vec - ref_vec)
         bm:da.Array = dm < mz_tolerance
-        bm = da.asarray(bm, chunks=(10240,10240))
+        bm = da.asarray(bm, chunks=bm_chunks)
         
         return qry_irr_array, ref_irr_array, qry_block, tag_refs, bm
     

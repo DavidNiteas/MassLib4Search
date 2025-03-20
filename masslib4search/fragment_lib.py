@@ -164,6 +164,9 @@ class FragLib(BaseLib):
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
         batch_size: int = 10,
+        qry_chunks: int = 5120,
+        ref_chunks: int = 5120,
+        I_F_D_matrix_chunks: Tuple[int, int, int] = (10240, 10240, 5)
     ) -> pd.DataFrame: # columns: db_index, formula, adduct
 
         if adducts == 'all_adducts':
@@ -184,6 +187,9 @@ class FragLib(BaseLib):
             RT_tolerance=RT_tolerance,
             adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
             batch_size=batch_size,
+            qry_chunks=qry_chunks,
+            ref_chunks=ref_chunks,
+            I_F_D_matrix_chunks=I_F_D_matrix_chunks,
         )
         
         return results

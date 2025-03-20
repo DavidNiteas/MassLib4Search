@@ -143,6 +143,9 @@ class MolLib(BaseLib):
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
         batch_size: int = 10,
+        qry_chunks: int = 5120,
+        ref_chunks: int = 5120,
+        I_F_D_matrix_chunks: Tuple[int, int, int] = (10240, 10240, 5)
     ) -> Optional[pd.DataFrame]:
         if self.FragmentLib.is_empty or query_mzs is None:
             return None
@@ -156,6 +159,9 @@ class MolLib(BaseLib):
                 RT_tolerance,
                 adduct_co_occurrence_threshold,  
                 batch_size,
+                qry_chunks,
+                ref_chunks,
+                I_F_D_matrix_chunks,
             )
     
     def search_embedding(
@@ -172,6 +178,11 @@ class MolLib(BaseLib):
         top_k: int = 5, # number of hits to return for each query
         search_type: Literal['mol'] = 'mol', # MolLib only supports 'mol' search type
         batch_size: int = 10,
+        qry_chunks_search_fragments: int = 5120,
+        ref_chunks_search_fragments: int = 5120,
+        I_F_D_matrix_chunks: Tuple[int, int, int] = (10240, 10240, 5),
+        query_chunks_search_embedding: int = 5120,
+        ref_chunks_search_embedding: int = 5120,
     ) -> pd.DataFrame: # columns: db_index, smiles, score, formula, adduct
         
         fragment_results = self.search_fragments(
@@ -182,7 +193,10 @@ class MolLib(BaseLib):
                                 query_RTs,
                                 RT_tolerance,
                                 adduct_co_occurrence_threshold,
-                                batch_size
+                                batch_size,
+                                qry_chunks_search_fragments,
+                                ref_chunks_search_fragments,
+                                I_F_D_matrix_chunks,
         )
         if fragment_results is None:
             tag_ref_index = None
@@ -190,7 +204,7 @@ class MolLib(BaseLib):
             tag_ref_index = fragment_results['db_ids']
         ref_embedding = self.get_embedding(embedding_name)
         embedding_results = search_tools.search_embeddings(
-            query_embedding,ref_embedding,tag_ref_index,top_k
+            query_embedding,ref_embedding,tag_ref_index,top_k,query_chunks_search_embedding,ref_chunks_search_embedding
         )
         
         print('Merging results...')

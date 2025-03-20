@@ -161,6 +161,9 @@ class SpecLib(BaseLib):
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
         batch_size: int = 10,
+        qry_chunks: int = 5120,
+        ref_chunks: int = 5120,
+        I_F_D_matrix_chunks: Tuple[int, int, int] = (10240, 10240, 5)
     ) -> Optional[pd.DataFrame]:
         if self.MolLib.is_empty or query_mzs is None:
             return None
@@ -174,6 +177,9 @@ class SpecLib(BaseLib):
                 RT_tolerance,
                 adduct_co_occurrence_threshold,  
                 batch_size,
+                qry_chunks,
+                ref_chunks,
+                I_F_D_matrix_chunks,
             )
             
     def search_precursors(
@@ -184,6 +190,9 @@ class SpecLib(BaseLib):
         query_RTs: Optional[NDArray[np.float_]] = None,
         RT_tolerance: float = 0.1,
         batch_size: int = 10,
+        qry_chunks: int = 5120,
+        ref_chunks: int = 5120,
+        Q_R_matrix_chunks: Tuple[int, int] = (10240, 10240)
     ) -> Optional[pd.DataFrame]:
         if self.PIs is None or query_mzs is None:
             return None
@@ -192,7 +201,10 @@ class SpecLib(BaseLib):
                 query_mzs,self.PIs,
                 mz_tolerance,mz_tolerance_type,
                 self.RTs,query_RTs,RT_tolerance,
-                batch_size
+                batch_size,
+                qry_chunks,
+                ref_chunks,
+                Q_R_matrix_chunks,
             )
     
     def search_embedding(
@@ -209,6 +221,11 @@ class SpecLib(BaseLib):
         top_k: int = 5, # number of hits to return for each query
         search_type: Literal['mol', 'spec'] = 'mol',
         batch_size: int = 10,
+        qry_chunks_search_fragments: int = 5120,
+        ref_chunks_search_fragments: int = 5120,
+        I_F_D_matrix_chunks: Tuple[int, int, int] = (10240, 10240, 5),
+        query_chunks_search_embedding: int = 5120,
+        ref_chunks_search_embedding: int = 5120,
     ) -> pd.DataFrame: # columns: db_ids, smiles, score, formula, adduct
         
         if search_type == 'mol':
@@ -221,20 +238,24 @@ class SpecLib(BaseLib):
                                     query_RTs,
                                     RT_tolerance,
                                     adduct_co_occurrence_threshold,
-                                    batch_size
+                                    batch_size,
+                                    qry_chunks_search_fragments,
+                                    ref_chunks_search_fragments,
+                                    I_F_D_matrix_chunks,
             )
         
         else:
             
-            fragment_results = self.search_fragments(
+            fragment_results = self.search_precursors(
                                     query_mzs,
-                                    adducts,
                                     mz_tolerance,
                                     mz_tolerance_type,
                                     query_RTs,
                                     RT_tolerance,
-                                    adduct_co_occurrence_threshold,
-                                    batch_size
+                                    batch_size,
+                                    qry_chunks_search_fragments,
+                                    ref_chunks_search_fragments,
+                                    I_F_D_matrix_chunks,
             )
             
         if fragment_results is None:
@@ -244,7 +265,9 @@ class SpecLib(BaseLib):
             
         ref_embedding = self.get_spec_embedding(embedding_name)
         embedding_results = search_tools.search_embeddings(
-            query_embedding,ref_embedding,tag_ref_index,top_k
+            query_embedding,ref_embedding,tag_ref_index,top_k,
+            query_chunks_search_embedding,
+            ref_chunks_search_embedding,
         )
         
         print('Merging results...')
