@@ -1,9 +1,8 @@
 from __future__ import annotations
 from . import search_tools,base_tools
-from .mass_lib_utils import BaseLib
+from .mass_lib_utils import BaseLib,CriticalDataMissingError
 import dask
 import dask.bag as db
-import dask.array as da
 import numpy as np
 import pandas as pd
 from functools import partial
@@ -22,17 +21,25 @@ def predict_adduct_mz(adduct: Adduct, mass: Union[float, None]) -> Union[float, 
 
 class FragLib(BaseLib):
     
+    row_major_schemas_tags = {
+        'fragments': CriticalDataMissingError("Fragments data is missing, which is required for FragLib"),
+        'metadatas': None,
+        "index": None,
+    }
+    
     non_adduct_columns = frozenset(['formula', 'RT', '[M]'])
     defualt_positive_adducts = ['[M]','[M+H]+', '[M+NH4]+', '[M+Na]+', '[M+K]+']
     defualt_negative_adducts = ['[M]', '[M-H]-', '[M+COOH]-', '[M+CH3COO]-']
     
-    @staticmethod
+    @classmethod
     def lazy_init(
+        cls,
         formula: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         index:Union[pd.Index,Sequence[Hashable],None] = None,
         metadatas: Optional[pd.DataFrame] = None,
+        name: Optional[str] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
         Union[Literal['index', 'formula', 'RT', 'adducts'],str],
@@ -45,6 +52,9 @@ class FragLib(BaseLib):
             None,
         ]
     ]:
+        if name is None:
+            name = cls.get_default_name()
+        
         if not isinstance(formula, db.Bag):
             formula = db.from_sequence(formula,npartitions=npartitions)
             
@@ -56,8 +66,14 @@ class FragLib(BaseLib):
             adducts:List[Adduct] = [Adduct.from_adduct_string(adduct_string) for adduct_string in adducts]
             
         exact_masses = formula.map(lambda x: Fragment.from_formula_string(x).ExactMass if x is not None else None)
-            
-        lazy_dict = {"index": index, "formula": formula, 'adducts': adducts, 'metadatas': metadatas}
+        
+        lazy_dict = {
+            "index": index, 
+            "formula": formula, 
+            'adducts': adducts, 
+            'metadatas': metadatas,
+            'name': name,
+        }
         for adduct in adducts:
             predict_mz_func = partial(predict_adduct_mz, adduct)
             lazy_dict[str(adduct)] = exact_masses.map(predict_mz_func)
@@ -81,6 +97,7 @@ class FragLib(BaseLib):
             self.fragments['RT'] = computed_lazy_dict['RT']
         self.fragments = pd.DataFrame(self.fragments,index=self.index)
         self.metadatas = computed_lazy_dict.get('metadatas', None)
+        self.name = computed_lazy_dict['name']
 
     def __init__(
         self, 
@@ -95,7 +112,7 @@ class FragLib(BaseLib):
     ):
         if formula is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(formula, RT, adducts, index, metadatas, num_workers)
+                lazy_dict = type(self).lazy_init(formula, RT, adducts, index, metadatas, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
@@ -214,26 +231,3 @@ class FragLib(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> FragLib:
         return base_tools.load_pickle(path)
-    
-    def to_dataframes(self) -> Dict[str,pd.DataFrame]:
-        dataframes = {
-            '/FragLib/index': pd.DataFrame({"index": self.Index},index=self.Index),
-            '/FragLib/fragments': self.Fragments,
-        }
-        if self.Metadatas is not None:
-            dataframes['/FragLib/metadatas'] = self.Metadatas
-        return dataframes
-    
-    @classmethod
-    def from_dataframes(cls, dataframes: Dict[str,pd.DataFrame]) -> FragLib:
-        new_lib = FragLib()
-        new_lib.metadatas = None
-        new_lib.index = None
-        new_lib.fragments = None
-        for key in dataframes:
-            if key.endswith('/FragLib/fragments'):
-                new_lib.fragments = dataframes[key]
-            elif key.endswith('/FragLib/metadatas'):
-                new_lib.metadatas = dataframes[key]
-            elif key.endswith('/FragLib/index'):
-                new_lib.index = dataframes[key].index

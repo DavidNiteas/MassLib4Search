@@ -8,10 +8,15 @@ from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from . import base_tools
 from abc import ABC, abstractmethod
+import json
+import uuid
+import warnings
 from numpy.typing import NDArray,ArrayLike
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
 class LibBase(ABC):
+    
+    NULL_PLACEHOLDER = "__NULL__"
     
     @staticmethod
     def get_index(computed_lazy_dict:dict) -> Optional[pd.Index]:
@@ -176,6 +181,18 @@ class BaseLibBlock(LibBase):
     def from_dataframe(dataframe: pd.DataFrame) -> BaseLibBlock:
         pass
     
+    def get_schema_name(self) -> str:
+        return self.__class__.__name__.lower()+"_"+str(uuid.uuid4()).replace("-","_")
+    
+    @abstractmethod
+    def to_row_major_schema(self) -> pd.DataFrame:
+        pass
+    
+    @classmethod
+    @abstractmethod
+    def from_row_major_schema(dataframe: pd.DataFrame) -> BaseLibBlock:
+        pass
+    
 class Spectrums(BaseLibBlock):
     
     @staticmethod
@@ -287,7 +304,7 @@ class Spectrums(BaseLibBlock):
             'RT': self.precursor_rts,
             'mzs': self.spectrum_mzs,
             'intensities': self.spectrum_intens,
-        },index=self.index)
+        },index=self.index).dropna(axis=1, how='all')
         
     @classmethod
     def from_dataframe(cls, dataframe: pd.DataFrame) -> Spectrums:
@@ -297,11 +314,25 @@ class Spectrums(BaseLibBlock):
                 spectrums.precursor_mzs = dataframe['PI']
             if 'RT' in dataframe.columns:
                 spectrums.precursor_rts = dataframe['RT']
-            if'mzs' in dataframe.columns:
+            if 'mzs' in dataframe.columns:
                 spectrums.spectrum_mzs = dataframe['mzs']
             if 'intensities' in dataframe.columns:
                 spectrums.spectrum_intens = dataframe['intensities']
             spectrums.index = dataframe.index
+        return spectrums
+        
+    def to_row_major_schema(self) -> pd.DataFrame:
+        df = self.to_dataframe()
+        json_cols = [col for col in ["mzs", "intensities"] if col in df.columns]
+        df[json_cols] = df[json_cols].map(lambda x: json.dumps(x,default=lambda x: x.tolist()))
+        return df
+        
+    @classmethod
+    def from_row_major_schema(cls, dataframe: pd.DataFrame) -> Spectrums:
+        df = dataframe.dropna(axis=1, how='all')
+        json_cols = [col for col in ["mzs", "intensities"] if col in df.columns]
+        df[json_cols] = df[json_cols].map(lambda x: json.loads(x)).map(np.array)
+        spectrums = cls.from_dataframe(df)
         return spectrums
         
 class Molecules(BaseLibBlock):
@@ -388,7 +419,7 @@ class Molecules(BaseLibBlock):
         return pd.DataFrame({
             'smiles': self.smiles,
             'inchi': self.inchi,
-        },index=self.index)
+        },index=self.index).dropna(axis=1, how='all')
         
     @classmethod
     def from_dataframe(cls, dataframe: pd.DataFrame) -> Molecules:
@@ -400,6 +431,13 @@ class Molecules(BaseLibBlock):
                 molecules.inchi = dataframe['inchi']
             molecules.index = dataframe.index
         return molecules
+    
+    def to_row_major_schema(self) -> pd.DataFrame:
+        return self.to_dataframe()
+    
+    @classmethod
+    def from_row_major_schema(cls, dataframe: pd.DataFrame) -> Molecules:
+        return cls.from_dataframe(dataframe)
     
 class Embeddings(BaseLibBlock):
     
@@ -482,7 +520,7 @@ class Embeddings(BaseLibBlock):
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame({
             name: self.__dict__[name] for name in self.__dict__ if name != 'index'
-        },index=self.index)
+        },index=self.index).dropna(axis=1, how='all')
         
     @classmethod
     def from_dataframe(cls, dataframe: Optional[pd.DataFrame]) -> Embeddings:
@@ -494,13 +532,108 @@ class Embeddings(BaseLibBlock):
                 embeddings.index = dataframe.index
         return embeddings
     
-class BaseLib(LibBase):
-    
-    @abstractmethod
-    def to_dataframes(self) -> Dict[str,pd.DataFrame]:
-        pass
+    def to_row_major_schema(self) -> pd.DataFrame:
+        return self.to_dataframe().map(lambda x: json.dumps(x,default=lambda x: x.tolist()))
     
     @classmethod
-    @abstractmethod
-    def from_dataframes(cls, dataframes: Dict[str,pd.DataFrame]):
-        pass
+    def from_row_major_schema(cls,dataframe: pd.DataFrame):
+        df = dataframe.dropna(axis=1, how='all').map(lambda x: json.loads(x)).map(np.array)
+        return cls.from_dataframe(df)
+    
+class CriticalDataMissingError(Exception):
+    '''
+    Exception raised when critical data is missing in a library data structure.
+    '''
+    pass
+
+class BaseLib(LibBase):
+    
+    name:str
+    row_major_schemas_tags: Dict[str,Union[BaseLibBlock,pd.DataFrame,None]]
+    
+    @classmethod
+    def get_default_name(cls) -> str:
+        return cls.__name__.lower()+"_"+str(uuid.uuid4()).replace("-","_")
+    
+    def push_in_row_major_schemas(
+        self,
+        meta_schema: Dict[str,str],
+        schemas: Dict[str,pd.DataFrame],
+        obj: Union[BaseLibBlock,BaseLib,pd.DataFrame,None],
+        obj_name: str,
+    ) -> None:
+        if isinstance(obj,BaseLibBlock):
+            if not obj.is_empty:
+                obj_schema_name = obj.get_schema_name()
+                meta_schema[obj_name] = obj_schema_name
+                schemas[obj_schema_name] = obj.to_row_major_schema()
+            else:
+                meta_schema[obj_name] = self.NULL_PLACEHOLDER
+        elif isinstance(obj,BaseLib):
+            if not obj.is_empty:
+                meta_schema[obj_name] = obj.name
+                schemas.update(obj.to_row_major_schemas())
+            else:
+                meta_schema[obj_name] = self.NULL_PLACEHOLDER
+        elif isinstance(obj,pd.DataFrame):
+            if not obj.empty:
+                obj_schema_name = obj_name+"_"+str(uuid.uuid4()).replace("-","_")
+                meta_schema[obj_name] = obj_schema_name
+                schemas[obj_schema_name] = obj
+            else:
+                meta_schema[obj_name] = self.NULL_PLACEHOLDER
+        else:
+            meta_schema[obj_name] = self.NULL_PLACEHOLDER
+    
+    @classmethod
+    def pull_from_row_major_schemas(
+        cls,
+        meta_schema: Dict[str,str],
+        schemas: Dict[str,pd.DataFrame],
+        obj_name: str,
+        default_obj: Union[BaseLibBlock,BaseLib,pd.DataFrame,pd.Index,None],
+    ) -> Union[BaseLibBlock,BaseLib,pd.DataFrame,pd.Index,None]:
+        if obj_name not in meta_schema:
+            raise ValueError(f"Object {obj_name} not found in meta schema of {cls.__name__}.")
+        if isinstance(default_obj,BaseLib):
+            return type(default_obj).from_row_major_schemas(schemas)
+        schema_name = meta_schema[obj_name]
+        if schema_name == cls.NULL_PLACEHOLDER:
+            if isinstance(default_obj, Exception):
+                raise default_obj
+            return default_obj
+        if schema_name not in schemas:
+            raise ValueError(f"Schema {schema_name} not found in schemas of {cls.__name__}.")
+        if isinstance(default_obj,BaseLibBlock):
+            return type(default_obj).from_row_major_schema(schemas[schema_name])
+        else:
+            if obj_name == "index":
+                return pd.Index(schemas[schema_name][obj_name])
+            else:
+                return schemas[schema_name]
+    
+    def to_row_major_schemas(self) -> Dict[str,pd.DataFrame]:
+        meta_schema = {}
+        schemas = {}
+        for obj_name in self.row_major_schemas_tags:
+            if obj_name == "index":
+                obj = pd.DataFrame(self.__dict__[obj_name],columns=[obj_name])
+            else:
+                obj = self.__dict__[obj_name]
+            self.push_in_row_major_schemas(meta_schema, schemas, obj, obj_name)
+        schemas[type(self).__name__.lower()] = pd.DataFrame([meta_schema],index=[self.name])
+        return schemas
+    
+    @classmethod
+    def from_row_major_schemas(cls, schemas: Dict[str,pd.DataFrame]):
+        if cls.__name__.lower() not in schemas:
+            raise ValueError(f"Meta schema {cls.__name__.lower()} not found in schemas of {cls.__name__}.")
+        schema_meta_df = schemas[cls.__name__.lower()]
+        if len(schema_meta_df) > 1:
+            warnings.warn(f"Multiple meta schema found in schemas of {cls.__name__}. Using the first one.")
+        meta_schema = schemas[cls.__name__.lower()].iloc[0].to_dict()
+        lib_obj = cls()
+        for obj_name, default_obj in cls.row_major_schemas_tags.items():
+            lib_obj.__dict__[obj_name] = cls.pull_from_row_major_schemas(meta_schema, schemas, obj_name, default_obj)
+        lib_obj.name = schema_meta_df.index[0]
+        return lib_obj

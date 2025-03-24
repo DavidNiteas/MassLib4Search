@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .mass_lib_utils import BaseLib,Molecules,Embeddings
+from .mass_lib_utils import BaseLib,Molecules,Embeddings,CriticalDataMissingError
 from .fragment_lib import FragLib
 from . import search_tools,base_tools
 import dask
@@ -25,14 +25,24 @@ def smiles2formula(smiles: str) -> Optional[str]:
 
 class MolLib(BaseLib):
     
-    @staticmethod
+    row_major_schemas_tags = {
+        "molecules": Molecules(),
+        "embeddings": Embeddings(),
+        "fragments": FragLib(),
+        'metadatas': None,
+        "index": None,
+    }
+    
+    @classmethod
     def lazy_init(
+        cls,
         smiles: Union[List[str],db.Bag],
         RT: Optional[List[Optional[float],db.Bag]] = None,
         adducts: Union[List[str],Literal['pos','neg']] = 'pos',
         embeddings: Dict[str, Union[NDArray[np.float32],db.Bag,da.Array]] = {},
         index:Union[pd.Index,Sequence[Hashable],None] = None,
         metadatas: Optional[pd.DataFrame] = None,
+        name: Optional[str] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
         Literal['index', 'mols', 'embeddings', 'fragments',],
@@ -41,19 +51,27 @@ class MolLib(BaseLib):
         pd.DataFrame, # metadatas
         None,]
     ]:
+        if name is None:
+            name = cls.get_default_name()
         mols_lazy_dict = Molecules.lazy_init(smiles, index=index, npartitions=npartitions)
         embeddings_lazy_dict = Embeddings.lazy_init(embeddings, index=index, npartitions=npartitions)
         if not isinstance(smiles, db.Bag):
             smiles = db.from_sequence(smiles,npartitions=npartitions)
         formulas = smiles.map(lambda x: smiles2formula(x))
-        frag_lib_lazy_dict = FragLib.lazy_init(formulas, RT, adducts, npartitions)
-        return {
+        frag_lib_lazy_dict = FragLib.lazy_init(
+            formulas, RT, adducts, index, 
+            name=name,
+            npartitions=npartitions,
+        )
+        lazy_dict = {
             'index': index,
             'mols': mols_lazy_dict,
             'embeddings': embeddings_lazy_dict,
             'fragments': frag_lib_lazy_dict,
             'metadatas': metadatas,
+            'name': name,
         }
+        return lazy_dict
         
     def from_lazy(
         self,
@@ -67,6 +85,7 @@ class MolLib(BaseLib):
         self.fragments = computed_lazy_dict['fragments']
         self.embeddings = computed_lazy_dict['embeddings']
         self.metadatas = computed_lazy_dict['metadatas']
+        self.name = computed_lazy_dict['name']
     
     def __init__(
         self,
@@ -82,7 +101,7 @@ class MolLib(BaseLib):
     ):
         if not (all(x is None for x in [smiles,RT,index,computed_lazy_dict]) and len(embeddings) == 0):
             if not isinstance(computed_lazy_dict, dict):
-                lazy_dict = self.lazy_init(smiles, RT, adducts, embeddings, index, metadatas, num_workers)
+                lazy_dict = type(self).lazy_init(smiles, RT, adducts, embeddings, index, metadatas, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
     
@@ -254,35 +273,3 @@ class MolLib(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> MolLib:
         return base_tools.load_pickle(path)
-    
-    def to_dataframes(self):
-        dataframes = {
-            '/MolLib/index': pd.DataFrame({'index': self.index},index=self.index),
-            '/MolLib/mols': self.molecules.to_dataframe()
-        }
-        fragments_dfs = self.fragments.to_dataframes()
-        for k,v in fragments_dfs.items():
-            dataframes[f'/MolLib{k}'] = v
-        if not self.embeddings.is_empty:
-            dataframes['/MolLib/embeddings'] = self.embeddings.to_dataframe()
-        if self.metadatas is not None:
-            dataframes['/MolLib/metadatas'] = self.metadatas
-        return dataframes
-    
-    @classmethod
-    def from_dataframes(cls, dataframes: Dict[str,pd.DataFrame]) -> MolLib:
-        new_lib = MolLib()
-        new_lib.embeddings = Embeddings()
-        new_lib.index = None
-        new_lib.metadatas = None
-        new_lib.molecules = None
-        new_lib.fragments = FragLib.from_dataframes(dataframes)
-        for key in dataframes:
-            if key.endswith('/MolLib/mols'):
-                new_lib.molecules = Molecules.from_dataframe(dataframes[key])
-            elif key.endswith('/MolLib/embeddings'):
-                new_lib.embeddings = Embeddings.from_dataframe(dataframes[key])
-            elif key.endswith('/MolLib/metadatas'):
-                new_lib.metadatas = dataframes[key]
-            elif key.endswith('/MolLib/index'):
-                new_lib.index = dataframes[key].index

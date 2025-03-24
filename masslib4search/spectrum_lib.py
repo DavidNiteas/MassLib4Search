@@ -12,8 +12,17 @@ from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, H
 
 class SpecLib(BaseLib):
     
-    @staticmethod
+    row_major_schemas_tags = {
+        'spectrums': Spectrums(),
+        'spec_embeddings': Embeddings(),
+        'mol_lib': MolLib(),
+        'metadatas': None,
+        "index": None,
+    }
+    
+    @classmethod
     def lazy_init(
+        cls,
         PI: Union[List[float],db.Bag,None] = None,
         RT: Union[List[float],db.Bag,None] = None,
         mzs: Union[List[List[float]],db.Bag,None] = None,
@@ -25,6 +34,7 @@ class SpecLib(BaseLib):
         mol_embeddings: Dict[str, Union[NDArray[np.float32],da.Array]] = {},
         index: Union[pd.Index,db.Bag,None] = None,
         metadatas: Optional[pd.DataFrame] = None,
+        name: Optional[str] = None,
         npartitions: Optional[int] = None,
     ) -> Dict[
         Literal['index', 'spec', 'spec_embeddings', 'mol_lib'],
@@ -36,15 +46,21 @@ class SpecLib(BaseLib):
             None,
         ]
     ]:
+        if name is None:
+            name = cls.get_default_name()
         spec_lazy_dict = Spectrums.lazy_init(PI, RT, mzs, intensities, index=index, npartitions=npartitions)
         spec_embdeddings_lazy_dict = Embeddings.lazy_init(spec_embeddings, index=index, npartitions=npartitions)
-        mol_lib_lazy_dict = MolLib.lazy_init(smiles, mol_RT, mol_adducts, mol_embeddings, index=index, npartitions=npartitions)
+        mol_lib_lazy_dict = MolLib.lazy_init(
+            smiles, mol_RT, mol_adducts, mol_embeddings, 
+            index=index, npartitions=npartitions, name=name,
+        )
         return {
             'index': index,
             'spec': spec_lazy_dict,
             'spec_embeddings': spec_embdeddings_lazy_dict,
             'mol_lib': mol_lib_lazy_dict,
             'metadatas': metadatas,
+            'name':name,
         }
         
     def from_lazy(
@@ -59,6 +75,7 @@ class SpecLib(BaseLib):
         self.spec_embeddings = computed_lazy_dict['spec_embeddings']
         self.mol_lib = computed_lazy_dict['mol_lib']
         self.metadatas = computed_lazy_dict['metadatas']
+        self.name = computed_lazy_dict['name']
     
     def __init__(
         self,
@@ -81,7 +98,7 @@ class SpecLib(BaseLib):
             and all(len(x) == 0 for x in [spec_embeddings, mol_embeddings])):
                 
             if not isinstance(computed_lazy_dict,dict):
-                lazy_dict = self.lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, index, num_workers)
+                lazy_dict = type(self).lazy_init(PI, RT, mzs, intensities, spec_embeddings, smiles, mol_RT, mol_adducts, mol_embeddings, index, num_workers)
                 (computed_lazy_dict,) = dask.compute(lazy_dict,scheduler=scheduler,num_workers=num_workers)
             self.from_lazy(**computed_lazy_dict)
         
@@ -317,38 +334,3 @@ class SpecLib(BaseLib):
     @classmethod
     def from_pickle(cls, path: str) -> SpecLib:
         return base_tools.load_pickle(path)
-    
-    def to_dataframes(self) -> Dict[str, pd.DataFrame]:
-        dataframes = {
-            "/SpecLib/index": pd.DataFrame({"index": self.index},index=self.index),
-        }
-        if not self.spectrums.is_empty:
-            dataframes['/SpecLib/spectrums'] = self.spectrums.to_dataframe()
-        if not self.spec_embeddings.is_empty:
-            dataframes['/SpecLib/embeddings'] = self.spec_embeddings.to_dataframe()
-        if not self.mol_lib.is_empty:
-            mol_lib_dfs = self.mol_lib.to_dataframes()
-            for k,v in mol_lib_dfs.items():
-                dataframes[f'/SpecLib{k}'] = v
-        if self.metadatas is not None:
-            dataframes['/SpecLib/metadatas'] = self.metadatas
-        return dataframes
-    
-    @classmethod
-    def from_dataframes(cls, dataframes: Dict[str, pd.DataFrame]) -> SpecLib:
-        new_lib = SpecLib()
-        new_lib.index = None
-        new_lib.spectrums = None
-        new_lib.metadatas = None
-        new_lib.spec_embeddings = Embeddings()
-        new_lib.mol_lib = MolLib.from_dataframes(dataframes)
-        for key in dataframes:
-            if key.endswith('/SpecLib/index'):
-                new_lib.index = dataframes[key].index
-            elif key.endswith('/SpecLib/spectrums'):
-                new_lib.spectrums = Spectrums.from_dataframe(dataframes[key])
-            elif key.endswith('/SpecLib/embeddings'):
-                new_lib.spec_embeddings = Embeddings.from_dataframe(dataframes[key])
-            elif key.endswith('/SpecLib/metadatas'):
-                new_lib.metadatas = dataframes[key]
-        return new_lib
