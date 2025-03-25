@@ -222,6 +222,7 @@ class FragLib(BaseLib):
         new_lib.fragments = self.item_select(self.Fragments,iloc)
         new_lib.metadatas = self.item_select(self.Metadatas,iloc)
         new_lib.index = self.Index[iloc]
+        new_lib.name = self.name
         return new_lib
     
     @classmethod
