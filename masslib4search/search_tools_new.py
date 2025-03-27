@@ -56,12 +56,12 @@ def get_fragments_hits_numpy(
     return np.column_stack((qry_index, ref_index, adduct_index)).astype(np.uint32)
 
 def get_fragments_hits_cupy(
-    qry_ions_array: np.ndarray,           # shape: (n_ions,) np.float32
-    ref_fragment_mzs_array: np.ndarray,   # shape: (n_ref, n_adducts) np.float32
+    qry_ions_array: NDArray[np.float32],           # shape: (n_ions,) np.float32
+    ref_fragment_mzs_array: NDArray[np.float32],   # shape: (n_ref, n_adducts) np.float32
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[np.ndarray] = None,  # shape: (n_ref,) np.float16
-    query_RTs: Optional[np.ndarray] = None,# shape: (n_ions,) np.float16
+    ref_RTs: Optional[NDArray[np.float16]] = None,  # shape: (n_ref,) np.float16
+    query_RTs: Optional[NDArray[np.float16]] = None,# shape: (n_ions,) np.float16
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1,
     ref_offset: int = 0,
