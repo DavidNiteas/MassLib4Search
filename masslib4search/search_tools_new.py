@@ -4,15 +4,111 @@ import dask.dataframe as dd
 import dask.array as da
 import numba as nb
 import numpy as np
+import cupy as cp
+import torch
 import pandas as pd
 from rich import print
 from numpy.typing import NDArray
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
 
-def get_fragments_hits(
+@nb.njit(nogil=True)
+def get_fragments_hits_numpy(
+    qry_ions_array: NDArray[np.float32],
+    ref_fragment_mzs_array: NDArray[np.float32],
+    mz_tolerance: float = 3,
+    mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+    ref_RTs: Optional[NDArray[np.float16]] = None,
+    query_RTs: Optional[NDArray[np.float16]] = None,
+    RT_tolerance: float = 0.1,
+    adduct_co_occurrence_threshold: int = 1,
+    ref_offset: int = 0,
+    qry_offset: int = 0,
+) -> NDArray[np.uint32]:
+    # 计算绝对m/z差
+    IDF_matrix = np.abs(qry_ions_array[:, np.newaxis, np.newaxis] - ref_fragment_mzs_array[np.newaxis, :, :])
     
-):
-    pass
+    # 处理ppm容差
+    if mz_tolerance_type == 'ppm':
+        IDF_matrix *= 1e6 / ref_fragment_mzs_array[np.newaxis, :, :]
+    
+    # 生成布尔矩阵
+    IDF_matrix = np.less_equal(IDF_matrix, mz_tolerance)
+    
+    # 处理RT容差
+    if ref_RTs is not None and query_RTs is not None:
+        RT_matrix = np.abs(query_RTs[:, np.newaxis] - ref_RTs[np.newaxis, :])
+        RT_matrix = np.less_equal(RT_matrix, RT_tolerance)
+        IDF_matrix *= RT_matrix[:, :, np.newaxis]  # 删除del语句
+    
+    # 应用加合物共现阈值
+    if adduct_co_occurrence_threshold > 1:
+        valid_refs = (IDF_matrix.sum(axis=0).sum(axis=1) >= adduct_co_occurrence_threshold)
+        IDF_matrix *= valid_refs[np.newaxis, :, np.newaxis]
+    
+    # 获取命中索引
+    qry_index, ref_index, adduct_index = np.where(IDF_matrix)
+    
+    # 应用偏移量
+    qry_index += qry_offset
+    ref_index += ref_offset
+    
+    # 返回堆叠结果
+    return np.column_stack((qry_index, ref_index, adduct_index)).astype(np.uint32)
+
+def get_fragments_hits_cupy(
+    qry_ions_array: np.ndarray,           # shape: (n_ions,) np.float32
+    ref_fragment_mzs_array: np.ndarray,   # shape: (n_ref, n_adducts) np.float32
+    mz_tolerance: float = 3,
+    mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
+    ref_RTs: Optional[np.ndarray] = None,  # shape: (n_ref,) np.float16
+    query_RTs: Optional[np.ndarray] = None,# shape: (n_ions,) np.float16
+    RT_tolerance: float = 0.1,
+    adduct_co_occurrence_threshold: int = 1,
+    ref_offset: int = 0,
+    qry_offset: int = 0,
+) -> np.ndarray:
+    """GPU 加速版本，返回形状为 (n_hits, 3) 的 uint32 数组"""
+    
+    # 将数据迁移到 GPU 显存 (避免不必要的拷贝)
+    qry_gpu = cp.asarray(qry_ions_array, dtype=cp.float32)
+    ref_gpu = cp.asarray(ref_fragment_mzs_array, dtype=cp.float32)
+    
+    # 计算 m/z 差异矩阵 (n_ions, n_ref, n_adducts)
+    delta = cp.abs(qry_gpu[:, None, None] - ref_gpu[None, :, :])
+    
+    # 计算 ppm 容差 (原位操作优化显存)
+    if mz_tolerance_type == 'ppm':
+        delta = delta * (1e6 / ref_gpu[None, :, :])
+    
+    # 生成 m/z 布尔矩阵
+    mz_mask = delta <= mz_tolerance
+    del delta  # 及时释放显存
+    
+    # 处理 RT 条件
+    if ref_RTs is not None and query_RTs is not None:
+        rt_gpu = cp.abs(cp.asarray(query_RTs)[:, None] - cp.asarray(ref_RTs)[None, :])
+        rt_mask = rt_gpu <= RT_tolerance
+        mz_mask = mz_mask * rt_mask[:, :, None]  # 广播到 adduct 维度
+        del rt_gpu, rt_mask
+    
+    # 应用加合物共现阈值
+    if adduct_co_occurrence_threshold > 1:
+        # 计算每个参考碎片的有效加合物总数
+        adduct_counts = mz_mask.any(axis=0).sum(axis=1)  # (n_ref,)
+        valid_refs = adduct_counts >= adduct_co_occurrence_threshold
+        mz_mask = mz_mask * valid_refs[None, :, None]  # 广播到其他维度
+    
+    # 收集结果索引 (使用 CuPy 优化操作)
+    qry_idx, ref_idx, adduct_idx = cp.where(mz_mask)
+    
+    # 应用偏移并返回结果到 CPU
+    result = cp.stack([
+        qry_idx + qry_offset,
+        ref_idx + ref_offset,
+        adduct_idx
+    ], axis=1).astype(cp.uint32)
+    
+    return result.get()  # 将结果传回 CPU
 
 def search_fragments(
     qry_ions: pd.Series, # shape: (n_ions,)
