@@ -1,7 +1,9 @@
 from __future__ import annotations
-from .mass_lib_utils import BaseLib,Molecules,Embeddings,CriticalDataMissingError
+
+from .lib_utils import io
+from .base_lib import BaseLib,Molecules,Embeddings,CriticalDataMissingError
 from .fragment_lib import FragLib
-from . import search_tools,base_tools
+from .search_utils import search_tools
 import dask
 import dask.bag as db
 import dask.array as da
@@ -269,8 +271,8 @@ class MolLib(BaseLib):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> MolLib:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> MolLib:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)

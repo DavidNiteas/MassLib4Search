@@ -1,6 +1,8 @@
 from __future__ import annotations
-from . import base_tools,search_tools
-from .mass_lib_utils import BaseLib,Spectrums,Embeddings
+
+from .lib_utils import io
+from .search_utils import search_tools
+from .base_lib import BaseLib,Spectrums,Embeddings
 from .molecule_lib import MolLib,FragLib
 import dask
 import dask.bag as db
@@ -330,8 +332,8 @@ class SpecLib(BaseLib):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> SpecLib:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> SpecLib:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)

@@ -1,6 +1,8 @@
 from __future__ import annotations
-from . import search_tools,base_tools
-from .mass_lib_utils import BaseLib,CriticalDataMissingError
+
+from .lib_utils import io
+from .search_utils import search_tools
+from .base_lib import BaseLib,CriticalDataMissingError
 import dask
 import dask.bag as db
 import numpy as np
@@ -227,8 +229,8 @@ class FragLib(BaseLib):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> FragLib:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> FragLib:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)
