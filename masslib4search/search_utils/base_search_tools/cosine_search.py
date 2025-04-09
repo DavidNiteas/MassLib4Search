@@ -1,62 +1,5 @@
 import torch
 from typing import Tuple
-from torch import Tensor
-
-@torch.no_grad()
-def broadcast(
-    Q: Tensor,
-    R: Tensor
-) -> Tuple[Tensor, Tensor]:
-    
-    Q_expanded = Q.view(*Q.shape, *(1,)*R.ndim)
-    R_expanded = R.view(*(1,)*Q.ndim, *R.shape)
-    
-    return Q_expanded, R_expanded
-
-@torch.no_grad()
-def get_delta_matrix(
-    Q: Tensor,
-    R: Tensor
-) -> Tensor:
-    
-    return torch.abs(Q - R)
-
-@torch.no_grad()
-def ppm_convert(
-    D: Tensor,
-    R: Tensor,
-) -> Tensor:
-    return D * (1e6 / R)
-
-@torch.no_grad()
-def get_bool_matrix(
-    D: Tensor,
-    T: float
-) -> Tensor:
-    return D <= T
-
-@torch.no_grad()
-def adduct_co_occurrence_filter(
-    B: Tensor,
-    adduct_co_occurrence_threshold: int,
-) -> Tensor:
-    return B & (B.any(dim=0).sum(dim=1) >= adduct_co_occurrence_threshold).view(1, -1, 1)
-
-@torch.no_grad()
-def get_indices(
-    B: Tensor,
-) -> Tensor:
-    return B.nonzero(as_tuple=False)
-
-@torch.no_grad()
-def indices_offset(
-    I: Tensor,
-    qry_offset: int,
-    ref_offset: int,
-) -> Tensor:
-    I[:, 0] += qry_offset
-    I[:, 1] += ref_offset
-    return I
 
 @torch.no_grad()
 def cosine_similarity_cpu(
@@ -108,8 +51,7 @@ def cosine_similarity_gpu(
             # 在计算流中执行矩阵乘法
             with torch.cuda.stream(compute_stream):
                 sim = q_chunk @ current_r.T
-                # 关键修复点：使用正确的方法传输
-                chunk_results.append(sim.to('cpu', non_blocking=True))  # ✅ 正确异步传输
+                chunk_results.append(sim.to('cpu', non_blocking=True))
                 
             # 在传输流中预取下一批数据
             if next_r is not None:
@@ -270,6 +212,3 @@ def cosine_similarity_search(
         return cosine_similarity_search_cpu(query, ref, top_k, chunk_size)
     else:
         return cosine_similarity_search_gpu(query, ref, top_k, chunk_size)
-
-if __name__ == '__main__':
-    indices_offset(torch.tensor([[1, 2], [3, 4]]), 10, 20)
