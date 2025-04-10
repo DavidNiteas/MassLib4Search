@@ -96,8 +96,7 @@ def mz_search_cpu(
             ref_size = r_chunk.size(0)
 
             # 计算质量差矩阵 (q_chunk_size, ref_chunk_size)
-            Q = q_chunk.unsqueeze(1)
-            R = r_chunk.unsqueeze(0)
+            Q, R = broadcast(q_chunk, r_chunk)
             delta = torch.abs(Q - R)
 
             # 处理ppm转换
@@ -111,7 +110,9 @@ def mz_search_cpu(
             if query_RTs is not None and ref_RTs is not None:
                 rt_q = query_RTs[q_offset:q_offset+q_chunk.size(0)]
                 rt_r = ref_RTs[current_ref_offset:current_ref_offset+ref_size]
-                rt_delta = torch.abs(rt_q.unsqueeze(1) - rt_r.unsqueeze(0))
+                rt_q, rt_r = broadcast(rt_q, rt_r)
+                rt_delta = torch.abs(rt_q - rt_r)
+                rt_delta = rt_delta.reshape(*rt_delta.shape, *tuple(1 for _ in range(delta.ndim-rt_delta.ndim)))
                 mz_mask &= rt_delta <= RT_tolerance
 
             # 计算局部索引并应用偏移
@@ -168,8 +169,7 @@ def mz_search_gpu(
 
             with torch.cuda.stream(compute_stream):
                 # 计算当前分块
-                Q = q_chunk.unsqueeze(1)
-                R = current_r.unsqueeze(0)
+                Q, R = broadcast(q_chunk, current_r)
                 delta = torch.abs(Q - R)
 
                 if mz_tolerance_type == 'ppm':
@@ -181,7 +181,9 @@ def mz_search_gpu(
                 if query_RTs is not None and ref_RTs is not None:
                     rt_q = query_RTs[q_offset:q_offset+q_chunk.size(0)]
                     rt_r = ref_RTs[current_ref_offset:current_ref_offset+current_r.size(0)]
-                    rt_delta = torch.abs(rt_q.unsqueeze(1) - rt_r.unsqueeze(0))
+                    rt_q, rt_r = broadcast(rt_q, rt_r)
+                    rt_delta = torch.abs(rt_q - rt_r)
+                    rt_delta = rt_delta.reshape(*rt_delta.shape, *tuple(1 for _ in range(delta.ndim-rt_delta.ndim)))
                     mz_mask &= rt_delta <= RT_tolerance
 
                 # 生成全局索引
