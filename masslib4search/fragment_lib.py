@@ -111,7 +111,14 @@ class FragLib(BaseLib):
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
+        name: Optional[str] = None,
     ):
+        # 确保始终初始化name属性
+        if name is not None:
+            self.name = name
+        else:
+            self.name = self.__class__.get_default_name()
+            
         if formula is not None or computed_lazy_dict is not None:
             if not isinstance(computed_lazy_dict, dict):
                 lazy_dict = type(self).lazy_init(formula, RT, adducts, index, metadatas, num_workers)
@@ -218,13 +225,21 @@ class FragLib(BaseLib):
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> FragLib:
         if self.is_empty:
-            return self.__class__()
+            new_lib = self.__class__()
+            if hasattr(self, 'name'):
+                new_lib.name = self.name
+            else:
+                new_lib.name = self.__class__.get_default_name()
+            return new_lib
         iloc = self.format_selection(i_and_key)
         new_lib = FragLib()
         new_lib.fragments = self.item_select(self.Fragments,iloc)
         new_lib.metadatas = self.item_select(self.Metadatas,iloc)
         new_lib.index = self.Index[iloc]
-        new_lib.name = self.name
+        if hasattr(self, 'name'):
+            new_lib.name = self.name
+        else:
+            new_lib.name = self.__class__.get_default_name()
         return new_lib
     
     @classmethod
