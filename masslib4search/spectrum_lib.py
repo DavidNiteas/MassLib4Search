@@ -92,7 +92,14 @@ class SpecLib(BaseLib):
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
+        name: Optional[str] = None,
     ):
+        # 确保始终初始化name属性
+        if name is not None:
+            self.name = name
+        else:
+            self.name = self.__class__.get_default_name()
+            
         if not \
             (all(x is None for x in [PI, RT, mzs, intensities, smiles, mol_RT, index, computed_lazy_dict]) \
             and all(len(x) == 0 for x in [spec_embeddings, mol_embeddings])):
@@ -317,7 +324,12 @@ class SpecLib(BaseLib):
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> SpecLib:
         if self.is_empty:
-            return self.__class__()
+            new_lib = self.__class__()
+            if hasattr(self, 'name'):
+                new_lib.name = self.name
+            else:
+                new_lib.name = self.__class__.get_default_name()
+            return new_lib
         iloc = self.format_selection(i_and_key)
         new_lib = SpecLib()
         new_lib.spectrums = self.item_select(self.spectrums,iloc)
@@ -325,7 +337,10 @@ class SpecLib(BaseLib):
         new_lib.mol_lib = self.item_select(self.mol_lib,iloc)
         new_lib.metadatas = self.item_select(self.metadatas,iloc)
         new_lib.index = self.Index[iloc]
-        new_lib.name = self.name
+        if hasattr(self, 'name'):
+            new_lib.name = self.name
+        else:
+            new_lib.name = self.__class__.get_default_name()
         return new_lib
     
     @classmethod

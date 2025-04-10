@@ -98,7 +98,14 @@ class MolLib(BaseLib):
         scheduler: Optional[str] = None,
         num_workers: Optional[int] = None,
         computed_lazy_dict: Optional[dict] = None,
+        name: Optional[str] = None,
     ):
+        # 确保始终初始化name属性
+        if name is not None:
+            self.name = name
+        else:
+            self.name = self.__class__.get_default_name()
+            
         if not (all(x is None for x in [smiles,RT,index,computed_lazy_dict]) and len(embeddings) == 0):
             if not isinstance(computed_lazy_dict, dict):
                 lazy_dict = type(self).lazy_init(smiles, RT, adducts, embeddings, index, metadatas, num_workers)
@@ -256,7 +263,12 @@ class MolLib(BaseLib):
         i_and_key: Union[int,slice,Sequence,Tuple[Union[int,Sequence[int]],Union[Hashable,Sequence[Hashable]],Sequence[bool]]]
     ) -> MolLib:
         if self.is_empty:
-            return self.__class__()
+            new_lib = self.__class__()
+            if hasattr(self, 'name'):
+                new_lib.name = self.name
+            else:
+                new_lib.name = self.__class__.get_default_name()
+            return new_lib
         iloc = self.format_selection(i_and_key)
         new_lib = MolLib()
         new_lib.molecules = self.item_select(self.molecules, iloc)
@@ -264,7 +276,10 @@ class MolLib(BaseLib):
         new_lib.embeddings = self.item_select(self.embeddings, iloc)
         new_lib.metadatas = self.item_select(self.metadatas, iloc)
         new_lib.index = self.Index[iloc]
-        new_lib.name = self.name
+        if hasattr(self, 'name'):
+            new_lib.name = self.name
+        else:
+            new_lib.name = self.__class__.get_default_name()
         return new_lib
     
     @classmethod
