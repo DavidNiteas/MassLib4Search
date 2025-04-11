@@ -37,8 +37,8 @@ def search_precursors(
     ref_precursor_mzs_queue: List[pd.Series], # shape: (n_ref,) float32
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float_]] = None,
-    query_RTs: Optional[NDArray[np.float_]] = None,
+    ref_RTs: Optional[NDArray[np.float16]] = None,
+    query_RTs: Optional[NDArray[np.float16]] = None,
     RT_tolerance: float = 0.1,
     chunk_size: int = 5120,
     device: str = 'cuda',

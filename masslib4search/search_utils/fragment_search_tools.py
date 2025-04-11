@@ -42,8 +42,8 @@ def search_fragments(
     ref_fragment_mzs_queue: List[pd.DataFrame], # shape: (n_ref_fragments, n_adducts), columns: adducts
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float_]] = None,  # shape: (n_fragments,)
-    query_RTs: Optional[NDArray[np.float_]] = None, # shape: (n_ions,)
+    ref_RTs: Optional[NDArray[np.float16]] = None,  # shape: (n_fragments,)
+    query_RTs: Optional[NDArray[np.float16]] = None, # shape: (n_ions,)
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
     chunk_size: int = 5120,

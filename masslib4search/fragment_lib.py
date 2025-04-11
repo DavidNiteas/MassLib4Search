@@ -186,7 +186,7 @@ class FragLib(BaseLib):
         adducts: Union[List[str], Literal['all_adducts', 'no_adducts']] = 'all_adducts',  # 加合物选择模式，'all_adducts' 表示考虑所有加合物（不包括 [M]），'no_adducts' 表示只考虑 [M]
         mz_tolerance: float = 3,  
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Optional[NDArray[np.float_]] = None,
+        query_RTs: Optional[NDArray[np.float16]] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
         batch_size: int = 10,

@@ -15,8 +15,8 @@ def search_fragments(
     ref_fragment_formulas: pd.Series, # shape: (n_ref_fragments,)
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float_]] = None,  # shape: (n_fragments,)
-    query_RTs: Optional[NDArray[np.float_]] = None, # shape: (n_ions,)
+    ref_RTs: Optional[NDArray[np.float16]] = None,  # shape: (n_fragments,)
+    query_RTs: Optional[NDArray[np.float16]] = None, # shape: (n_ions,)
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
     batch_size: int = 10,
@@ -40,7 +40,7 @@ def search_fragments(
         ref_RT_vec = da.from_array(ref_RTs, chunks=ref_chunks)[None,:]
     
     def get_IFD_matrix(
-        qry_block: Union[NDArray[np.float_],Tuple[NDArray[np.float_],NDArray[np.float_]]],
+        qry_block: Union[NDArray[np.float32],Tuple[NDArray[np.float16],NDArray[np.float16]]],
     ) -> da.Array: # shape: (batch_size, n_ref, n_adducts)
         
         if isinstance(qry_block, tuple):
@@ -96,8 +96,8 @@ def search_precursors(
     ref_precursor_mzs: pd.Series, # shape: (n_ref_precursors,)
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float_]] = None,  # shape: (n_ref_precursors,)
-    query_RTs: Optional[NDArray[np.float_]] = None, # shape: (n_ions,)
+    ref_RTs: Optional[NDArray[np.float16]] = None,  # shape: (n_ref_precursors,)
+    query_RTs: Optional[NDArray[np.float16]] = None, # shape: (n_ions,)
     RT_tolerance: float = 0.1,
     batch_size: int = 10,
     qry_chunks: int = 5120,
@@ -120,7 +120,7 @@ def search_precursors(
         ref_RT_vec = da.from_array(ref_RTs, chunks=ref_chunks)[None,:]
     
     def get_QR_matrix(
-        qry_block: Union[NDArray[np.float_],Tuple[NDArray[np.float_],NDArray[np.float_]]],
+        qry_block: Union[NDArray[np.float32],Tuple[NDArray[np.float16],NDArray[np.float16]]],
     ) -> da.Array: # shape: (batch_size, n_ref)
         
         if isinstance(qry_block, tuple):
@@ -225,8 +225,8 @@ def deocde_index_and_score(
     return I, S
 
 def search_embeddings(
-    qry_embeddings: pd.Series, # Series[1d-NDArray[np.float_]]
-    ref_embeddings: pd.Series, # Series[1d-NDArray[np.float_]]
+    qry_embeddings: pd.Series, # Series[1d-NDArray[np.float32]]
+    ref_embeddings: pd.Series, # Series[1d-NDArray[np.float32]]
     tag_ref_index: Optional[pd.Series] = None, # Series[1d-NDArray[Hashable] | 'null']
     top_k: Optional[int] = None,
     qry_chunks: int = 5120,
