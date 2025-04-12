@@ -1,6 +1,8 @@
 from __future__ import annotations
-from . import search_tools,base_tools
-from .mass_lib_utils import BaseLib,CriticalDataMissingError
+
+from .lib_utils import io
+from .search_utils import search_tools
+from .base_lib import BaseLib,CriticalDataMissingError
 import dask
 import dask.bag as db
 import numpy as np
@@ -184,7 +186,7 @@ class FragLib(BaseLib):
         adducts: Union[List[str], Literal['all_adducts', 'no_adducts']] = 'all_adducts',  # 加合物选择模式，'all_adducts' 表示考虑所有加合物（不包括 [M]），'no_adducts' 表示只考虑 [M]
         mz_tolerance: float = 3,  
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Optional[NDArray[np.float_]] = None,
+        query_RTs: Optional[NDArray[np.float16]] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
         batch_size: int = 10,
@@ -242,8 +244,8 @@ class FragLib(BaseLib):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> FragLib:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> FragLib:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)

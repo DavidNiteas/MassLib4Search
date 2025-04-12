@@ -6,7 +6,7 @@ import dask.bag as db
 import dask.array as da
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
-from . import base_tools
+from .lib_utils import io
 from abc import ABC, abstractmethod
 import json
 import uuid
@@ -153,18 +153,18 @@ class LibBase(ABC):
         return self.select(i_and_key)
     
     def to_bytes(self) -> bytes:
-        return base_tools.to_pickle_bytes(self)
+        return io.to_pickle_bytes(self)
     
     @classmethod
     def from_bytes(cls, data: bytes) -> LibBase:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     def to_pickle(self, path: str):
-        base_tools.save_pickle(self, path)
+        io.save_pickle(self, path)
     
     @classmethod
     def from_pickle(cls, path: str) -> LibBase:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)
     
     @property
     def is_empty(self) -> bool:
@@ -292,11 +292,11 @@ class Spectrums(BaseLibBlock):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> Spectrums:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> Spectrums:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)
     
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame({
@@ -409,11 +409,11 @@ class Molecules(BaseLibBlock):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> Molecules:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> Molecules:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)
     
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame({
@@ -511,11 +511,11 @@ class Embeddings(BaseLibBlock):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> Embeddings:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> Embeddings:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)
     
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame({
@@ -646,7 +646,7 @@ class BaseLib(LibBase):
         table_replace: bool = True,
     ) -> None:
         schemas = self.to_row_major_schemas()
-        base_tools.save_dfs_to_SQLite(path, schemas, chunk_size=chunk_size, max_workers=max_workers, table_replace=table_replace)
+        io.save_dfs_to_SQLite(path, schemas, chunk_size=chunk_size, max_workers=max_workers, table_replace=table_replace)
     
     @classmethod
     def from_SQLite(
@@ -655,5 +655,5 @@ class BaseLib(LibBase):
         chunk_size: int = 2048,
         max_workers: int = 8
     ) -> None:
-        schemas = base_tools.load_dfs_from_SQLite(path,chunk_size=chunk_size,max_workers=max_workers)
+        schemas = io.load_dfs_from_SQLite(path,chunk_size=chunk_size,max_workers=max_workers)
         return cls.from_row_major_schemas(schemas)

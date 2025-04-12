@@ -4,111 +4,10 @@ import dask.dataframe as dd
 import dask.array as da
 import numba as nb
 import numpy as np
-import cupy as cp
-import torch
 import pandas as pd
 from rich import print
 from numpy.typing import NDArray
 from typing import List, Tuple, Dict, Union, Callable, Optional, Any, Literal, Hashable, Sequence
-
-@nb.njit(nogil=True)
-def get_fragments_hits_numpy(
-    qry_ions_array: NDArray[np.float32],
-    ref_fragment_mzs_array: NDArray[np.float32],
-    mz_tolerance: float = 3,
-    mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float16]] = None,
-    query_RTs: Optional[NDArray[np.float16]] = None,
-    RT_tolerance: float = 0.1,
-    adduct_co_occurrence_threshold: int = 1,
-    ref_offset: int = 0,
-    qry_offset: int = 0,
-) -> NDArray[np.uint32]:
-    # 计算绝对m/z差
-    IDF_matrix = np.abs(qry_ions_array[:, np.newaxis, np.newaxis] - ref_fragment_mzs_array[np.newaxis, :, :])
-    
-    # 处理ppm容差
-    if mz_tolerance_type == 'ppm':
-        IDF_matrix *= 1e6 / ref_fragment_mzs_array[np.newaxis, :, :]
-    
-    # 生成布尔矩阵
-    IDF_matrix = np.less_equal(IDF_matrix, mz_tolerance)
-    
-    # 处理RT容差
-    if ref_RTs is not None and query_RTs is not None:
-        RT_matrix = np.abs(query_RTs[:, np.newaxis] - ref_RTs[np.newaxis, :])
-        RT_matrix = np.less_equal(RT_matrix, RT_tolerance)
-        IDF_matrix *= RT_matrix[:, :, np.newaxis]  # 删除del语句
-    
-    # 应用加合物共现阈值
-    if adduct_co_occurrence_threshold > 1:
-        valid_refs = (IDF_matrix.sum(axis=0).sum(axis=1) >= adduct_co_occurrence_threshold)
-        IDF_matrix *= valid_refs[np.newaxis, :, np.newaxis]
-    
-    # 获取命中索引
-    qry_index, ref_index, adduct_index = np.where(IDF_matrix)
-    
-    # 应用偏移量
-    qry_index += qry_offset
-    ref_index += ref_offset
-    
-    # 返回堆叠结果
-    return np.column_stack((qry_index, ref_index, adduct_index)).astype(np.uint32)
-
-def get_fragments_hits_cupy(
-    qry_ions_array: np.ndarray,           # shape: (n_ions,) np.float32
-    ref_fragment_mzs_array: np.ndarray,   # shape: (n_ref, n_adducts) np.float32
-    mz_tolerance: float = 3,
-    mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[np.ndarray] = None,  # shape: (n_ref,) np.float16
-    query_RTs: Optional[np.ndarray] = None,# shape: (n_ions,) np.float16
-    RT_tolerance: float = 0.1,
-    adduct_co_occurrence_threshold: int = 1,
-    ref_offset: int = 0,
-    qry_offset: int = 0,
-) -> np.ndarray:
-    """GPU 加速版本，返回形状为 (n_hits, 3) 的 uint32 数组"""
-    
-    # 将数据迁移到 GPU 显存 (避免不必要的拷贝)
-    qry_gpu = cp.asarray(qry_ions_array, dtype=cp.float32)
-    ref_gpu = cp.asarray(ref_fragment_mzs_array, dtype=cp.float32)
-    
-    # 计算 m/z 差异矩阵 (n_ions, n_ref, n_adducts)
-    delta = cp.abs(qry_gpu[:, None, None] - ref_gpu[None, :, :])
-    
-    # 计算 ppm 容差 (原位操作优化显存)
-    if mz_tolerance_type == 'ppm':
-        delta = delta * (1e6 / ref_gpu[None, :, :])
-    
-    # 生成 m/z 布尔矩阵
-    mz_mask = delta <= mz_tolerance
-    del delta  # 及时释放显存
-    
-    # 处理 RT 条件
-    if ref_RTs is not None and query_RTs is not None:
-        rt_gpu = cp.abs(cp.asarray(query_RTs)[:, None] - cp.asarray(ref_RTs)[None, :])
-        rt_mask = rt_gpu <= RT_tolerance
-        mz_mask = mz_mask * rt_mask[:, :, None]  # 广播到 adduct 维度
-        del rt_gpu, rt_mask
-    
-    # 应用加合物共现阈值
-    if adduct_co_occurrence_threshold > 1:
-        # 计算每个参考碎片的有效加合物总数
-        adduct_counts = mz_mask.any(axis=0).sum(axis=1)  # (n_ref,)
-        valid_refs = adduct_counts >= adduct_co_occurrence_threshold
-        mz_mask = mz_mask * valid_refs[None, :, None]  # 广播到其他维度
-    
-    # 收集结果索引 (使用 CuPy 优化操作)
-    qry_idx, ref_idx, adduct_idx = cp.where(mz_mask)
-    
-    # 应用偏移并返回结果到 CPU
-    result = cp.stack([
-        qry_idx + qry_offset,
-        ref_idx + ref_offset,
-        adduct_idx
-    ], axis=1).astype(cp.uint32)
-    
-    return result.get()  # 将结果传回 CPU
 
 def search_fragments(
     qry_ions: pd.Series, # shape: (n_ions,)
@@ -116,34 +15,89 @@ def search_fragments(
     ref_fragment_formulas: pd.Series, # shape: (n_ref_fragments,)
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float_]] = None,  # shape: (n_fragments,)
-    query_RTs: Optional[NDArray[np.float_]] = None, # shape: (n_ions,)
+    ref_RTs: Optional[NDArray[np.float16]] = None,  # shape: (n_fragments,)
+    query_RTs: Optional[NDArray[np.float16]] = None, # shape: (n_ions,)
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
-    ref_batch_size: int = 10000,
+    batch_size: int = 10,
     qry_chunks: int = 5120,
     ref_chunks: int = 5120,
     I_F_D_matrix_chunks: Tuple[int,int,int] = (10240, 10240, 5),
 ) -> pd.DataFrame: # columns: db_index, formula, adduct
     
-    ref_fragment_mzs_array_block = np.array_split(ref_fragment_mzs.values,ref_batch_size)
+    qry_index = qry_ions.index
+    qry_blocks = np.array_split(qry_ions.values,batch_size)
     if ref_RTs is not None and query_RTs is not None:
-        ref_RT_blocks = np.array_split(ref_RTs,ref_batch_size)
+        qry_RT_blocks = np.array_split(query_RTs,batch_size)
     
     if ref_RTs is not None and query_RTs is not None:
-        ref_block_bag = db.from_sequence(zip(ref_fragment_mzs_array_block, ref_RT_blocks))
+        qry_bag = db.from_sequence(zip(qry_blocks, qry_RT_blocks), partition_size=1)
     else:
-        ref_block_bag = db.from_sequence(ref_fragment_mzs_array_block)
-        
+        qry_bag = db.from_sequence(qry_blocks, partition_size=1)
     
+    ref_vec = da.from_array(ref_fragment_mzs.values, chunks=(ref_chunks, 1))[None,:,:]
+    if ref_RTs is not None and query_RTs is not None:
+        ref_RT_vec = da.from_array(ref_RTs, chunks=ref_chunks)[None,:]
+    
+    def get_IFD_matrix(
+        qry_block: Union[NDArray[np.float32],Tuple[NDArray[np.float16],NDArray[np.float16]]],
+    ) -> da.Array: # shape: (batch_size, n_ref, n_adducts)
+        
+        if isinstance(qry_block, tuple):
+            qry_block, qry_RT_block = qry_block
+            qry_RT_block_vec = da.from_array(qry_RT_block, chunks=qry_chunks)[:, None]
+        else:
+            qry_RT_block = None
+            
+        qry_block_vec = da.from_array(qry_block, chunks=qry_chunks)[:, None, None]
+        d_matrix = da.abs(qry_block_vec - ref_vec)
+        if mz_tolerance_type == 'ppm':
+            d_matrix = d_matrix / ref_vec * 1e6
+        I_F_D_matrix = da.asarray(d_matrix <= mz_tolerance, chunks=I_F_D_matrix_chunks)
+        
+        if qry_RT_block is not None:
+            d_matrix_RT = da.abs(qry_RT_block_vec - ref_RT_vec)
+            bool_matrix_RT = da.asarray(d_matrix_RT <= RT_tolerance, chunks=(I_F_D_matrix_chunks[0], I_F_D_matrix_chunks[1]))
+            I_F_D_matrix = I_F_D_matrix & bool_matrix_RT[:, :, None]
+        
+        return I_F_D_matrix
+    
+    qry_bag = qry_bag.map(get_IFD_matrix)
+    
+    print('Preparing IFD matrix...')
+    da_list = dask.compute(qry_bag,scheduler='threads')[0]
+    print('Computing IFD matrix...')
+    np_list = dask.compute(da_list,scheduler='threads')[0]
+    I_F_D_matrix = np.concatenate(np_list, axis=0)
+    
+    if adduct_co_occurrence_threshold > 1:
+        print('Filtering adducts by co-occurrence...')
+        I_F_D_matrix = da.from_array(I_F_D_matrix, chunks=I_F_D_matrix_chunks)
+        F_D_matrix = da.sum(I_F_D_matrix, axis=0, keepdims=False)
+        F_matrix = da.sum(F_D_matrix, axis=1, keepdims=False)
+        F_matrix = F_matrix >= adduct_co_occurrence_threshold
+        I_F_D_matrix = I_F_D_matrix & F_matrix[None, :, None]
+        I_F_D_matrix = dask.compute(I_F_D_matrix,scheduler='threads')[0]
+    
+    adducts = ref_fragment_mzs.columns.values
+    ref_index_array = ref_fragment_mzs.index.values
+    
+    print('Building result dataframe...')
+    bool_matrix_db = db.from_sequence(I_F_D_matrix, partition_size=1)
+    tag_index_db = bool_matrix_db.map(lambda x: np.where(x))
+    tag_formula_db = tag_index_db.map(lambda x: ref_fragment_formulas.values[x[0]] if len(x[0]) > 0 else 'null')
+    tag_adduct_db = tag_index_db.map(lambda x: adducts[x[1]] if len(x[1]) > 0 else 'null')
+    tag_index_db = tag_index_db.map(lambda x: ref_index_array[x[0]] if len(x[0]) > 0 else 'null')
+    tag_db_index,tag_formula,tag_adduct = dask.compute(tag_index_db,tag_formula_db,tag_adduct_db,scheduler='threads')
+    return pd.DataFrame({'db_ids': tag_db_index, 'formula': tag_formula, 'adduct': tag_adduct}, index=qry_index)
 
 def search_precursors(
     qry_ions: pd.Series, # shape: (n_ions,)
     ref_precursor_mzs: pd.Series, # shape: (n_ref_precursors,)
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-    ref_RTs: Optional[NDArray[np.float_]] = None,  # shape: (n_ref_precursors,)
-    query_RTs: Optional[NDArray[np.float_]] = None, # shape: (n_ions,)
+    ref_RTs: Optional[NDArray[np.float16]] = None,  # shape: (n_ref_precursors,)
+    query_RTs: Optional[NDArray[np.float16]] = None, # shape: (n_ions,)
     RT_tolerance: float = 0.1,
     batch_size: int = 10,
     qry_chunks: int = 5120,
@@ -166,7 +120,7 @@ def search_precursors(
         ref_RT_vec = da.from_array(ref_RTs, chunks=ref_chunks)[None,:]
     
     def get_QR_matrix(
-        qry_block: Union[NDArray[np.float_],Tuple[NDArray[np.float_],NDArray[np.float_]]],
+        qry_block: Union[NDArray[np.float32],Tuple[NDArray[np.float16],NDArray[np.float16]]],
     ) -> da.Array: # shape: (batch_size, n_ref)
         
         if isinstance(qry_block, tuple):
@@ -271,8 +225,8 @@ def deocde_index_and_score(
     return I, S
 
 def search_embeddings(
-    qry_embeddings: pd.Series, # Series[1d-NDArray[np.float_]]
-    ref_embeddings: pd.Series, # Series[1d-NDArray[np.float_]]
+    qry_embeddings: pd.Series, # Series[1d-NDArray[np.float32]]
+    ref_embeddings: pd.Series, # Series[1d-NDArray[np.float32]]
     tag_ref_index: Optional[pd.Series] = None, # Series[1d-NDArray[Hashable] | 'null']
     top_k: Optional[int] = None,
     qry_chunks: int = 5120,

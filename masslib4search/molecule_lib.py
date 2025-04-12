@@ -1,7 +1,9 @@
 from __future__ import annotations
-from .mass_lib_utils import BaseLib,Molecules,Embeddings,CriticalDataMissingError
+
+from .lib_utils import io
+from .base_lib import BaseLib,Molecules,Embeddings,CriticalDataMissingError
 from .fragment_lib import FragLib
-from . import search_tools,base_tools
+from .search_utils import search_tools
 import dask
 import dask.bag as db
 import dask.array as da
@@ -165,7 +167,7 @@ class MolLib(BaseLib):
         adducts: Union[List[str], Literal['all_adducts', 'no_adducts']] = 'all_adducts',  # 加合物选择模式，'all_adducts' 表示考虑所有加合物（不包括 [M]），'no_adducts' 表示只考虑 [M]
         mz_tolerance: float = 3,  
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Optional[NDArray[np.float_]] = None,
+        query_RTs: Optional[NDArray[np.float16]] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,  # if a formula has less than this number of adducts, it will be removed from the result
         batch_size: int = 10,
@@ -198,7 +200,7 @@ class MolLib(BaseLib):
         adducts: Union[List[str],Literal['all_adducts','no_adducts']] = 'all_adducts', # if 'all_adducts', all adducts (without [M]) will be considered, if 'no_adducts', only the [M] will be considered
         mz_tolerance: float = 3,
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
-        query_RTs: Optional[NDArray[np.float_]] = None,
+        query_RTs: Optional[NDArray[np.float16]] = None,
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1, # if a formula has less than this number of adducts, it will be removed from the result
         top_k: int = 5, # number of hits to return for each query
@@ -284,8 +286,8 @@ class MolLib(BaseLib):
     
     @classmethod
     def from_bytes(cls, data: bytes) -> MolLib:
-        return base_tools.from_pickle_bytes(data)
+        return io.from_pickle_bytes(data)
     
     @classmethod
     def from_pickle(cls, path: str) -> MolLib:
-        return base_tools.load_pickle(path)
+        return io.load_pickle(path)
