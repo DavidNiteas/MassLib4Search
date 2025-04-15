@@ -1,5 +1,5 @@
 import torch
-from MassLib4Search.masslib4search.search_utils.base_search_tools.peak_search import mz_search,broadcast
+from .peak_search import mz_search,broadcast
 import networkx as nx 
 from networkx.algorithms.isomorphism import GraphMatcher
 import pandas as pd

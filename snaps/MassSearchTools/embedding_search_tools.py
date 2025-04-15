@@ -1,5 +1,5 @@
 import torch
-from .base_search_tools.cosine_search import cosine_similarity_search
+from .utils.cosine_search import cosine_similarity_search
 import dask.bag as db
 import numpy as np
 import pandas as pd
