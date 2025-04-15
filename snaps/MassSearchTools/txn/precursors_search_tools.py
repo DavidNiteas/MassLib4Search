@@ -1,5 +1,5 @@
 import torch
-from .utils.peak_search import mz_search
+from ..utils.search.peak_search import mz_search
 import pandas as pd
 import numpy as np
 import dask.bag as db
