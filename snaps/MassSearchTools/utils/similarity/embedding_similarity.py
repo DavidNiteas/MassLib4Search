@@ -1,5 +1,6 @@
 import torch
 from ..torch_device import resolve_device
+from .similarity_operator import EmbbedingSimilarityOperator
 from typing import Callable, Literal, Optional, Union
 
 @torch.no_grad()
@@ -10,6 +11,16 @@ def tanimoto(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
     vbs = torch.sum(vb**2, dim=-1, keepdim=True)
     return vp / (vas + vbs.transpose(-1,-2) - vp + 1e-6)
 
+class TanimodoOperator(EmbbedingSimilarityOperator):
+    
+    @classmethod
+    def cuda_operator(cls):
+        return tanimoto
+    
+    @classmethod
+    def cpu_operator(cls):
+        return tanimoto
+
 @torch.no_grad()
 def cosine(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
     """余弦相似度"""
@@ -17,10 +28,30 @@ def cosine(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
     norm_b = torch.norm(vb, p=2, dim=-1, keepdim=True)
     return torch.matmul(va, vb.transpose(-1,-2)) / (norm_a * norm_b.transpose(-1,-2) + 1e-6)
 
+class CosineOperator(EmbbedingSimilarityOperator):
+    
+    @classmethod
+    def cuda_operator(cls):
+        return cosine
+    
+    @classmethod
+    def cpu_operator(cls):
+        return cosine
+
 @torch.no_grad()
 def dot(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
     """点积"""
     return torch.matmul(va, vb.transpose(-1,-2))
+
+class DotOperator(EmbbedingSimilarityOperator):
+    
+    @classmethod
+    def cuda_operator(cls):
+        return dot
+
+    @classmethod
+    def cpu_operator(cls):
+        return dot
 
 @torch.no_grad()
 def jaccard(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
@@ -28,6 +59,16 @@ def jaccard(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
     intersection = torch.logical_and(va.unsqueeze(-2), vb.unsqueeze(-3))
     union = torch.logical_or(va.unsqueeze(-2), vb.unsqueeze(-3))
     return torch.sum(intersection.float(), dim=-1) / (torch.sum(union.float(), dim=-1) + 1e-6)
+
+class JaccardOperator(EmbbedingSimilarityOperator):
+    
+    @classmethod
+    def cuda_operator(cls):
+        return jaccard
+
+    @classmethod
+    def cpu_operator(cls):
+        return jaccard
 
 @torch.no_grad()
 def pearson(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
@@ -42,6 +83,16 @@ def pearson(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
         torch.sum(centered_b**2, dim=-1, keepdim=True).transpose(-1,-2)
     )
     return numerator / (denominator + 1e-6)
+
+class PearsonOperator(EmbbedingSimilarityOperator):
+    
+    @classmethod
+    def cuda_operator(cls):
+        return pearson
+
+    @classmethod
+    def cpu_operator(cls):
+        return pearson
 
 @torch.no_grad()
 def embedding_similarity_cpu(
@@ -127,26 +178,30 @@ def embedding_similarity(
     query: torch.Tensor,
     ref: torch.Tensor,
     chunk_size: int = 5120,
-    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
+    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    operator_kwargs: Optional[dict] = None,
 ) -> torch.Tensor:
 
     # 自动推断工作设备
     _work_device = resolve_device(work_device, query.device)
     # 自动推断输出设备
     _output_device = resolve_device(output_device, _work_device)
-
+    
+    # 算子生成
+    operator = sim_operator.get_operator(_work_device,operator_kwargs)
+    
     # 分发到具体实现
     if _work_device.type.startswith('cuda'):
         return embedding_similarity_cuda(
-            query, ref, chunk_size, sim_operator,
+            query, ref, chunk_size, operator,
             work_device=_work_device,
             output_device=_output_device
         )
     else:
         return embedding_similarity_cpu(
-            query, ref, chunk_size, sim_operator,
+            query, ref, chunk_size, operator,
             work_device=_work_device,
             output_device=_output_device
         )
