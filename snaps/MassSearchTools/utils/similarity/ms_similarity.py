@@ -2,7 +2,9 @@ import torch
 from ..torch_device import resolve_device
 from .similarity_operator import SpectramSimilarityOperator
 import ms_entropy as me
+import dask
 import dask.bag as db
+from itertools import cycle
 from typing import List, Callable, Optional, Union, Literal
 
 def ms_entropy_similarity(
@@ -30,33 +32,36 @@ class MSEntropyOperator(SpectramSimilarityOperator):
 
 @torch.no_grad()
 def spectrum_similarity_cpu(
-    query: List[torch.Tensor],  # List[(n_peaks, 2)]
-    ref: List[torch.Tensor], # List[(n_peaks, 2)]
+    query: List[List[torch.Tensor]],  # Queue[List[(n_peaks, 2)]]
+    ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    num_workers: int = 4,
+    num_dask_workers: int = 4,
     work_device: torch.device = torch.device("cpu"),
     output_device: Optional[torch.device] = None,
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
-) -> torch.Tensor:
+) -> List[torch.Tensor]: # Queue[(len(query_block), len(ref_block)]
 
     # 构建配对序列
-    query_bag = db.from_sequence(query, npartitions=num_workers)
-    ref_bag = db.from_sequence(ref, npartitions=num_workers)
-    pairs_bag = query_bag.product(ref_bag)
+    bag_queue = []
+    for query_block, ref_block in zip(query, ref):
+        query_block_bag = db.from_sequence(query_block, npartitions=num_dask_workers)
+        ref_block_bag = db.from_sequence(ref_block, npartitions=num_dask_workers)
+        pairs_bag = query_block_bag.product(ref_block_bag)
+        pairs_bag = pairs_bag.map(lambda x: sim_operator(x[0].to(work_device), x[1].to(work_device)))
+        results_bag = pairs_bag.map(lambda s: torch.stack(s).reshape(len(query_block), len(ref_block)).to(output_device or work_device))
+        bag_queue.append(results_bag)
     
     # 使用dask并行计算
-    pairs_bag = pairs_bag.map(lambda x: sim_operator(x[0].to(work_device), x[1].to(work_device)))
-    results = pairs_bag.compute(scheduler=dask_mode, num_workers=num_workers)
+    queue_results = dask.compute(bag_queue, scheduler=dask_mode, num_workers=num_dask_workers)[0]
     
-    # 重组为矩阵
-    return torch.stack(results).reshape(len(query), len(ref)).to(output_device or work_device)
+    return queue_results
 
 @torch.no_grad()
-def spectrum_similarity_cuda(
-    query: List[torch.Tensor],
-    ref: List[torch.Tensor],
+def spectrum_similarity_cuda_block(
+    query: List[torch.Tensor], # List[(n_peaks, 2)]
+    ref: List[torch.Tensor], # List[(n_peaks, 2)]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    num_workers: int = 4,
+    num_cuda_workers: int = 4,
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> torch.Tensor:
@@ -73,26 +78,26 @@ def spectrum_similarity_cuda(
             'h2d_event': torch.cuda.Event(),
             'compute_event': torch.cuda.Event(),
         }
-        for _ in range(num_workers)
+        for _ in range(num_cuda_workers)
     ]
     
     # 预分配设备内存
-    ref_device = [t.to(work_device, non_blocking=True) for t in ref]
     results = torch.zeros(len(query), len(ref), device=output_device)
 
     # 异步执行函数
     def _process_pair(q_idx, r_idx, worker_id):
         resources = worker_resources[worker_id]
         
-        # Stage 1: 数据传输到work_device
+        # 修改后的Stage 1：同时传输query和ref
         with torch.cuda.stream(resources['h2d_stream']):
             q_tensor = query[q_idx].pin_memory().to(work_device, non_blocking=True)
+            r_tensor = ref[r_idx].pin_memory().to(work_device, non_blocking=True)
             resources['h2d_event'].record()
         
-        # Stage 2: 计算（等待数据传输完成）
+        # Stage 2保持不变（但使用新传输的r_tensor）
         with torch.cuda.stream(resources['compute_stream']):
             resources['h2d_event'].wait()
-            similarity = sim_operator(q_tensor, ref_device[r_idx])
+            similarity = sim_operator(q_tensor, r_tensor)  # 改用动态传输的ref
             resources['compute_event'].record()
         
         # Stage 3: 结果传回output_device
@@ -104,8 +109,7 @@ def spectrum_similarity_cuda(
                 results[q_idx, r_idx] = similarity
 
     # 任务调度器
-    from itertools import cycle
-    worker_cycle = cycle(range(num_workers))
+    worker_cycle = cycle(range(num_cuda_workers))
     
     # 提交任务到流水线
     futures = []
@@ -124,6 +128,24 @@ def spectrum_similarity_cuda(
     
     return results
 
+@torch.no_grad()
+def spectrum_similarity_cuda(
+    query: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
+    ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
+    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    num_cuda_workers: int = 4,
+    num_dask_workers: int = 4,
+    work_device: torch.device = torch.device("cuda:0"),
+    output_device: Optional[torch.device] = None,
+) -> List[torch.Tensor]:
+    
+    block_bag = db.from_sequence(zip(query, ref), npartitions=num_dask_workers)
+    block_bag = block_bag.map(lambda x: spectrum_similarity_cuda_block(
+        x[0], x[1], sim_operator, num_cuda_workers, work_device, output_device
+    ))
+    results = block_bag.compute(scheduler='threads', num_workers=num_dask_workers)
+    return results
+
 def spectrum_similarity(
     query: List[torch.Tensor],
     ref: List[torch.Tensor],
@@ -133,7 +155,7 @@ def spectrum_similarity(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
-) -> torch.Tensor:
+) -> List[torch.Tensor]:
 
     # 设备推断
     _work_device = resolve_device(work_device, query[0].device if query else torch.device('cpu'))
