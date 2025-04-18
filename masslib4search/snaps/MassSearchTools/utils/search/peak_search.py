@@ -1,7 +1,9 @@
 import torch
-from typing import Tuple
+from ..torch_device import resolve_device
 from torch import Tensor
-from typing import Literal, Optional
+import dask.bag as db
+from functools import partial
+from typing import Literal, Optional, Union, Tuple, List
 
 @torch.no_grad()
 def broadcast(
@@ -55,91 +57,93 @@ def indices_offset(
 @torch.no_grad()
 def adduct_co_occurrence_filter(
     I: Tensor,
-    adduct_co_occurrence_threshold: int,
+    threshold: int,
     dim: int,
-) -> Tensor:
+    D: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    
     if I.size(0) == 0:
-        return I
+        return (I, D) if D is not None else I
     
-    # 直接统计实际存在的参考样本
-    unique_refs, ref_counts = torch.unique(I[:,dim], return_counts=True)
+    # 统计有效参考样本
+    _, ref_counts = torch.unique(I[:, dim], return_counts=True)
+    valid_mask = ref_counts[I[:, dim]] >= threshold
     
-    # 过滤有效参考样本
-    valid_refs = unique_refs[ref_counts >= adduct_co_occurrence_threshold]
-    
-    # 二次过滤原始索引
-    return I[torch.isin(I[:,dim], valid_refs)]
+    # 同步过滤逻辑
+    return I[valid_mask], D[valid_mask]
 
 @torch.no_grad()
 def mz_search_cpu(
-    qry_ions: torch.Tensor,
-    ref_mzs: torch.Tensor,
+    qry_ions: Tensor,
+    ref_mzs: Tensor,
     mz_tolerance: float = 3,
     mz_tolerance_type: Literal['ppm','Da'] = 'ppm',
-    query_RTs: Optional[torch.Tensor] = None,
-    ref_RTs: Optional[torch.Tensor] = None,
+    query_RTs: Optional[Tensor] = None,
+    ref_RTs: Optional[Tensor] = None,
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1,
-    chunk_size: int = 5120
-) -> torch.Tensor:
+    chunk_size: int = 5120,
+    work_device: torch.device = torch.device("cpu"),
+    output_device: Optional[torch.device] = None,
+) -> Tuple[Tensor, Tensor]:
+    """改进的m/z搜索函数，支持设备管理和分块过滤"""
+    output_device = output_device or work_device
+    qry_ions = qry_ions.to(work_device)
+    ref_mzs = ref_mzs.to(work_device)
+    query_RTs = query_RTs.to(work_device) if query_RTs is not None else None
+    ref_RTs = ref_RTs.to(work_device) if ref_RTs is not None else None
 
-    all_indices = []
-    # 遍历查询分块
+    all_indices, all_deltas = [], []
+    q_dim = len(qry_ions.shape)
+
     for q_idx, q_chunk in enumerate(qry_ions.split(chunk_size)):
         q_offset = q_idx * chunk_size
+        current_ref_offset = 0
+        chunk_indices, chunk_deltas = [], []
 
-        current_ref_offset = 0  # 参考分块累计偏移
-        chunk_indices = []
-
-        # 遍历参考分块
         for r_chunk in ref_mzs.split(chunk_size):
-            ref_size = r_chunk.size(0)
-
-            # 计算质量差矩阵 (q_chunk_size, ref_chunk_size)
-            Q, R = broadcast(q_chunk, r_chunk)
+            Q, R = broadcast(q_chunk.to(work_device), r_chunk.to(work_device))
             delta = torch.abs(Q - R)
 
-            # 处理ppm转换
             if mz_tolerance_type == 'ppm':
                 delta = delta * (1e6 / R.clamp(min=1e-6))
 
-            # 生成质量过滤掩码
             mz_mask = delta <= mz_tolerance
 
-            # 处理RT过滤
             if query_RTs is not None and ref_RTs is not None:
-                rt_q = query_RTs[q_offset:q_offset+q_chunk.size(0)]
-                rt_r = ref_RTs[current_ref_offset:current_ref_offset+ref_size]
+                rt_q = query_RTs[q_offset:q_offset+len(q_chunk)]
+                rt_r = ref_RTs[current_ref_offset:current_ref_offset+len(r_chunk)]
                 rt_q, rt_r = broadcast(rt_q, rt_r)
                 rt_delta = torch.abs(rt_q - rt_r)
-                rt_delta = rt_delta.reshape(*rt_delta.shape, *tuple(1 for _ in range(delta.ndim-rt_delta.ndim)))
                 mz_mask &= rt_delta <= RT_tolerance
 
-            # 计算局部索引并应用偏移
             local_indices = mz_mask.nonzero(as_tuple=False)
             if local_indices.size(0) > 0:
-                # 使用 indices_offset 方法进行偏移
                 global_indices = indices_offset(local_indices, q_offset, current_ref_offset)
                 chunk_indices.append(global_indices)
+                chunk_deltas.append(delta[mz_mask])
 
-            current_ref_offset += ref_size
+            current_ref_offset += len(r_chunk)
 
-        # 合并当前查询分块结果
         if chunk_indices:
-            all_indices.append(torch.cat(chunk_indices, dim=0))
-            
-    I = torch.cat(all_indices, dim=0) if all_indices else torch.empty((0,2), dtype=torch.long)
-    
-    if adduct_co_occurrence_threshold > 1:
-        I = adduct_co_occurrence_filter(I, adduct_co_occurrence_threshold, dim=len(qry_ions.shape))
-        
-    if I.size(0) == 0:
-        I = I.reshape(0,len(qry_ions.shape)+len(ref_mzs.shape))
+            I_chunk = torch.cat(chunk_indices)
+            D_chunk = torch.cat(chunk_deltas)
 
-    return I
+            if adduct_co_occurrence_threshold > 1:
+                I_chunk, D_chunk = adduct_co_occurrence_filter(
+                    I_chunk, adduct_co_occurrence_threshold, q_dim, D_chunk
+                )
+
+            all_indices.append(I_chunk)
+            all_deltas.append(D_chunk)
+
+    I = torch.cat(all_indices) if all_indices else torch.empty((0, 2), dtype=torch.long, device=work_device)
+    D = torch.cat(all_deltas) if all_deltas else torch.empty((0,), dtype=ref_mzs.dtype, device=work_device)
+
+    return I.to(output_device), D.to(output_device)
 
 @torch.no_grad()
-def mz_search_gpu(
+def mz_search_cuda(
     qry_ions: torch.Tensor,
     ref_mzs: torch.Tensor,
     mz_tolerance: float = 3,
@@ -148,74 +152,108 @@ def mz_search_gpu(
     ref_RTs: Optional[torch.Tensor] = None,
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1,
-    chunk_size: int = 5120
-) -> torch.Tensor:
-
-    compute_stream = torch.cuda.current_stream()
-    transfer_stream = torch.cuda.Stream()
-    all_indices = []
-
+    chunk_size: int = 5120,
+    work_device: torch.device = torch.device("cuda:0"),
+    output_device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]: # Indices_tensor (hitted_num, qry_dim+ref_dim), Delta_tensor (hitted_num,)
+    
+    # 设备初始化
+    output_device = output_device or work_device
+    input_stream = torch.cuda.Stream()
+    compute_stream = torch.cuda.Stream()
+    output_stream = torch.cuda.Stream()
+    
+    # 数据预迁移
+    with torch.cuda.stream(input_stream):
+        qry_ions = qry_ions.to(work_device, non_blocking=True)
+        ref_mzs = ref_mzs.to(work_device, non_blocking=True)
+        query_RTs = query_RTs.to(work_device, non_blocking=True) if query_RTs is not None else None
+        ref_RTs = ref_RTs.to(work_device, non_blocking=True) if ref_RTs is not None else None
+    
+    # 分块管理
     q_chunks = list(qry_ions.split(chunk_size))
     r_chunks = list(ref_mzs.split(chunk_size))
-
+    
+    # 流水线控制
+    all_indices, all_deltas = [], []
+    
     for q_idx, q_chunk in enumerate(q_chunks):
         q_offset = q_idx * chunk_size
         current_ref_offset = 0
-        chunk_indices = []
-
-        current_r = r_chunks[0].clone()
+        chunk_indices, chunk_deltas = [], []
+        
+        # 初始化参考分块流水线
+        with torch.cuda.stream(input_stream):
+            current_r = r_chunks[0].to(work_device, non_blocking=True)
+        
         for r_idx in range(len(r_chunks)):
-            next_r = r_chunks[r_idx+1].clone() if r_idx+1 < len(r_chunks) else None
-
+            # 预取下一分块
+            next_r = r_chunks[r_idx+1] if r_idx+1 < len(r_chunks) else None
+            if next_r is not None:
+                with torch.cuda.stream(input_stream):
+                    next_r = next_r.to(work_device, non_blocking=True)
+            
+            # 计算逻辑
             with torch.cuda.stream(compute_stream):
-                # 计算当前分块
+                torch.cuda.current_stream().wait_stream(input_stream)
+                
                 Q, R = broadcast(q_chunk, current_r)
                 delta = torch.abs(Q - R)
-
+                
                 if mz_tolerance_type == 'ppm':
                     delta = delta * (1e6 / R.clamp(min=1e-6))
-
+                
                 mz_mask = delta <= mz_tolerance
-
-                # RT过滤
+                
                 if query_RTs is not None and ref_RTs is not None:
-                    rt_q = query_RTs[q_offset:q_offset+q_chunk.size(0)]
-                    rt_r = ref_RTs[current_ref_offset:current_ref_offset+current_r.size(0)]
+                    rt_q = query_RTs[q_offset:q_offset+len(q_chunk)]
+                    rt_r = ref_RTs[current_ref_offset:current_ref_offset+len(current_r)]
                     rt_q, rt_r = broadcast(rt_q, rt_r)
                     rt_delta = torch.abs(rt_q - rt_r)
-                    rt_delta = rt_delta.reshape(*rt_delta.shape, *tuple(1 for _ in range(delta.ndim-rt_delta.ndim)))
                     mz_mask &= rt_delta <= RT_tolerance
-
-                # 生成全局索引
+                
                 local_indices = mz_mask.nonzero(as_tuple=False)
                 if local_indices.size(0) > 0:
-                    # 使用 indices_offset 方法进行偏移
                     global_indices = indices_offset(local_indices, q_offset, current_ref_offset)
-                    chunk_indices.append(global_indices.cpu())
-
-            # 异步加载下个分块
-            if next_r is not None:
-                with torch.cuda.stream(transfer_stream):
-                    next_r = next_r.to(qry_ions.device, non_blocking=True)
-
+                    chunk_indices.append(global_indices)
+                    chunk_deltas.append(delta[mz_mask])
+            
+            # 结果回传
+            with torch.cuda.stream(output_stream):
+                torch.cuda.current_stream().wait_stream(compute_stream)
+                if chunk_indices:
+                    all_indices.append(torch.cat(chunk_indices).to(output_device, non_blocking=True))
+                    all_deltas.append(torch.cat(chunk_deltas).to(output_device, non_blocking=True))
+            
             current_ref_offset += current_r.size(0)
             current_r = next_r
-            compute_stream.wait_stream(transfer_stream)
-
-        # 收集当前查询分块结果
-        if chunk_indices:
-            all_indices.append(torch.cat(chunk_indices, dim=0))
-
-    torch.cuda.synchronize()
-    I = torch.cat(all_indices, dim=0) if all_indices else torch.empty((0,2), dtype=torch.long)
-    
-    if adduct_co_occurrence_threshold > 1:
-        I = adduct_co_occurrence_filter(I, adduct_co_occurrence_threshold, dim=len(qry_ions.shape))
         
-    if I.size(0) == 0:
-        I = I.reshape(0,len(qry_ions.shape)+len(ref_mzs.shape))
+        # 分块内加合物过滤
+        with torch.cuda.stream(compute_stream):
+            if adduct_co_occurrence_threshold > 1 and chunk_indices:
+                I_chunk = torch.cat(chunk_indices)
+                D_chunk = torch.cat(chunk_deltas)
+                I_chunk, D_chunk = adduct_co_occurrence_filter(
+                    I_chunk, adduct_co_occurrence_threshold, 
+                    len(qry_ions.shape), D=D_chunk
+                )
+                chunk_indices = [I_chunk]
+                chunk_deltas = [D_chunk]
     
-    return I
+    # 最终同步
+    torch.cuda.synchronize()
+    
+    # 结果整合
+    with torch.cuda.stream(output_stream):
+        I = torch.cat(all_indices) if all_indices else torch.empty((0,2), dtype=torch.long, device=output_device)
+        D = torch.cat(all_deltas) if all_deltas else torch.empty((0,), dtype=ref_mzs.dtype, device=output_device)
+        
+        # 维度校正
+        if I.size(0) == 0:
+            I = I.reshape(0, len(qry_ions.shape)+len(ref_mzs.shape))
+            D = D.reshape(0)
+    
+    return I, D
 
 def mz_search(
     qry_ions: torch.Tensor,
@@ -226,21 +264,100 @@ def mz_search(
     ref_RTs: Optional[torch.Tensor] = None,
     RT_tolerance: float = 0.1,
     adduct_co_occurrence_threshold: int = 1,
-    chunk_size: int = 5120
-) -> torch.Tensor:
+    chunk_size: int = 5120,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    output_device: Union[str, torch.device, Literal['auto']] = 'auto',
+) -> Tuple[torch.Tensor, torch.Tensor]:
     
-    if qry_ions.device != ref_mzs.device:
-        raise ValueError("Input tensors must be on the same device")
+    # 设备自动推断
+    _work_device = resolve_device(work_device, qry_ions.device)
+    _output_device = resolve_device(output_device, _work_device)
     
-    if query_RTs is not None and ref_RTs is not None:
-        if query_RTs.device != ref_RTs.device:
-            raise ValueError("RT tensors must be on the same device")
-    
-    if qry_ions.device.type == 'cpu':
-        return mz_search_cpu(qry_ions, ref_mzs, mz_tolerance, mz_tolerance_type,
-                            query_RTs, ref_RTs, RT_tolerance, 
-                            adduct_co_occurrence_threshold, chunk_size)
+    # 设备分发逻辑
+    if _work_device.type.startswith('cuda'):
+        return mz_search_cuda(
+            qry_ions, ref_mzs, 
+            mz_tolerance=mz_tolerance,
+            mz_tolerance_type=mz_tolerance_type,
+            query_RTs=query_RTs,
+            ref_RTs=ref_RTs,
+            RT_tolerance=RT_tolerance,
+            adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
+            chunk_size=chunk_size,
+            work_device=_work_device,
+            output_device=_output_device
+        )
     else:
-        return mz_search_gpu(qry_ions, ref_mzs, mz_tolerance, mz_tolerance_type,
-                            query_RTs, ref_RTs, RT_tolerance, 
-                            adduct_co_occurrence_threshold, chunk_size)
+        return mz_search_cpu(
+            qry_ions, ref_mzs,
+            mz_tolerance=mz_tolerance,
+            mz_tolerance_type=mz_tolerance_type,
+            query_RTs=query_RTs,
+            ref_RTs=ref_RTs,
+            RT_tolerance=RT_tolerance,
+            adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
+            chunk_size=chunk_size,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+        
+def mz_search_by_queue(
+    qry_ions_queue: List[torch.Tensor],
+    ref_mzs_queue: List[torch.Tensor],
+    mz_tolerance: float = 3,
+    mz_tolerance_type: Literal['ppm','Da'] = 'ppm',
+    query_RTs_queue: Optional[List[Optional[torch.Tensor]]] = None,
+    ref_RTs_queue: Optional[List[Optional[torch.Tensor]]] = None,
+    RT_tolerance: float = 0.1,
+    adduct_co_occurrence_threshold: int = 1,
+    chunk_size: int = 5120,
+    num_workers: int = 4,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    output_device: Union[str, torch.device, Literal['auto']] = 'auto',
+) -> List[Tuple[torch.Tensor,torch.Tensor]]:
+    
+    # 合法性检查
+    assert len(qry_ions_queue) == len(ref_mzs_queue)
+    if query_RTs_queue is not None:
+        assert len(qry_ions_queue) == len(query_RTs_queue)
+    if ref_RTs_queue is not None:
+        assert len(ref_mzs_queue) == len(ref_RTs_queue)
+    
+    # 设备自动推断
+    _work_device = resolve_device(work_device, qry_ions_queue[0].device)
+    _output_device = resolve_device(output_device, _work_device)
+    
+    # 构造工作函数
+    if _work_device.type.startswith('cuda'):
+        work_func = partial(
+            mz_search_cuda,
+            mz_tolerance=mz_tolerance,
+            mz_tolerance_type=mz_tolerance_type,
+            RT_tolerance=RT_tolerance,
+            adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
+            chunk_size=chunk_size,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+    else:
+        work_func = partial(
+            mz_search_cpu,
+            mz_tolerance=mz_tolerance,
+            mz_tolerance_type=mz_tolerance_type,
+            RT_tolerance=RT_tolerance,
+            adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
+            chunk_size=chunk_size,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+        
+    # 任务分发
+    query_RTs_queue = query_RTs_queue or [None] * len(qry_ions_queue)
+    ref_RTs_queue = ref_RTs_queue or [None] * len(ref_mzs_queue)
+    queue_bag = db.from_sequence(zip(qry_ions_queue, ref_mzs_queue, query_RTs_queue, ref_RTs_queue), npartitions=num_workers)
+    queue_results = queue_bag.map(work_func)
+    
+    # 计算
+    results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+    
+    return results

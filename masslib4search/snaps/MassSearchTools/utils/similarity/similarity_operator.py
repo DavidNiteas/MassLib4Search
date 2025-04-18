@@ -67,9 +67,9 @@ class SpectramSimilarityOperator(EmbbedingSimilarityOperator):
         cls,
     ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
         '''
-        Returns a function that computes the similarity between two batches of spectra.
+        Returns a function that computes the similarity between two spectra.
         The function takes two batches of spectra and returns a similarity matrix.
-        The similarity matrix is a tensor of shape (1, 1)
+        The similarity matrix is a zero-dimensional tensor
         '''
         raise NotImplementedError(f"{cls.__name__}.cuda_operator() not implemented")
     
@@ -78,9 +78,9 @@ class SpectramSimilarityOperator(EmbbedingSimilarityOperator):
         cls,
     ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
         '''
-        Returns a function that computes the similarity between two batches of spectra.
+        Returns a function that computes the similarity between two spectra.
         The function takes two batches of spectra and returns a similarity matrix.
-        The similarity matrix is a tensor of shape (1, 1)
+        The similarity matrix is a zero-dimensional tensor
         '''
         raise NotImplementedError(f"{cls.__name__}.cpu_operator() not implemented")
     
