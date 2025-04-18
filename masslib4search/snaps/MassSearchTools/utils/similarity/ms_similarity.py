@@ -11,7 +11,9 @@ def ms_entropy_similarity(
     query_spec: torch.Tensor, # (n_peaks, 2)
     ref_spec: torch.Tensor, # (n_peaks, 2)
 ) -> torch.Tensor: # (1,1)
-    return torch.tensor([[me.calculate_entropy_similarity(query_spec, ref_spec)]], device=query_spec.device)
+    print(query_spec.shape, ref_spec.shape)
+    sim = me.calculate_entropy_similarity(query_spec, ref_spec)
+    return torch.tensor([[sim]], device=query_spec.device)
 
 class MSEntropyOperator(SpectramSimilarityOperator):
     
@@ -47,12 +49,16 @@ def spectrum_similarity_cpu(
         query_block_bag = db.from_sequence(query_block, npartitions=num_dask_workers)
         ref_block_bag = db.from_sequence(ref_block, npartitions=num_dask_workers)
         pairs_bag = query_block_bag.product(ref_block_bag)
-        pairs_bag = pairs_bag.map(lambda x: sim_operator(x[0].to(work_device), x[1].to(work_device)))
-        results_bag = pairs_bag.map(lambda s: torch.stack(s).reshape(len(query_block), len(ref_block)).to(output_device or work_device))
+        results_bag = pairs_bag.map(lambda x: sim_operator(x[0].to(work_device), x[1].to(work_device)))
+        results_bag = results_bag.map(lambda s: s.to(output_device or work_device))
         bag_queue.append(results_bag)
     
     # 使用dask并行计算
     queue_results = dask.compute(bag_queue, scheduler=dask_mode, num_workers=num_dask_workers)[0]
+    # 合并结果
+    queue_results_bag = db.from_sequence(zip(queue_results,query,ref), npartitions=num_dask_workers)
+    queue_results_bag = queue_results_bag.map(lambda x: torch.cat(x[0], dim=0).reshape(len(x[1]), len(x[2])))
+    queue_results = queue_results_bag.compute(scheduler='threads', num_workers=num_dask_workers)
     
     return queue_results
 
