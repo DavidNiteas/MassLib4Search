@@ -1,7 +1,9 @@
 import torch
 from ..torch_device import resolve_device
 from .similarity_operator import EmbbedingSimilarityOperator
-from typing import Callable, Literal, Optional, Union
+from functools import partial
+import dask.bag as db
+from typing import Callable, Literal, Optional, Union, List
 
 @torch.no_grad()
 def tanimoto(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
@@ -205,3 +207,51 @@ def embedding_similarity(
             work_device=_work_device,
             output_device=_output_device
         )
+        
+def embedding_similarity_by_queue(
+    query_queue: List[torch.Tensor],
+    ref_queue: List[torch.Tensor],
+    chunk_size: int = 5120,
+    num_workers: int = 4,
+    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    output_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    operator_kwargs: Optional[dict] = None,
+) -> List[torch.Tensor]:
+    
+    # 合法性检查
+    assert len(query_queue) == len(ref_queue)
+    
+    # 自动设备
+    _work_device = resolve_device(work_device, query_queue[0].device)
+    _output_device = resolve_device(output_device, _work_device)
+    
+    # 算子生成
+    operator = sim_operator.get_operator(_work_device,operator_kwargs)
+    
+    # 构造工作函数
+    if _work_device.type.startswith('cuda'):
+        work_func = partial(
+            embedding_similarity_cuda,
+            chunk_size=chunk_size,
+            sim_operator=operator,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+    else:
+        work_func = partial(
+            embedding_similarity_cpu,
+            chunk_size=chunk_size,
+            sim_operator=operator,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+        
+    # 任务分发
+    queue_bag = db.from_sequence(zip(query_queue, ref_queue), npartitions=num_workers)
+    queue_results = queue_bag.map(lambda x: work_func(x[0],x[1]))
+    
+    # 计算
+    results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+    
+    return results

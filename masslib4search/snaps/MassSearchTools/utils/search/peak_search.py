@@ -355,7 +355,7 @@ def mz_search_by_queue(
     query_RTs_queue = query_RTs_queue or [None] * len(qry_ions_queue)
     ref_RTs_queue = ref_RTs_queue or [None] * len(ref_mzs_queue)
     queue_bag = db.from_sequence(zip(qry_ions_queue, ref_mzs_queue, query_RTs_queue, ref_RTs_queue), npartitions=num_workers)
-    queue_results = queue_bag.map(work_func)
+    queue_results = queue_bag.map(lambda x: work_func(x[0],x[1],query_RTs=x[2],ref_RTs=x[3]))
     
     # 计算
     results = queue_results.compute(scheduler='threads', num_workers=num_workers)
