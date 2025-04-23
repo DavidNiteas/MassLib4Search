@@ -100,8 +100,8 @@ class PearsonOperator(EmbbedingSimilarityOperator):
 def embedding_similarity_cpu(
     query: torch.Tensor, # shape: (n_q, dim), dtype: float32
     ref: torch.Tensor, # shape: (n_r, dim), dtype: float32
-    chunk_size: int = 5120,
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
+    chunk_size: int = 5120,
     work_device: torch.device = torch.device("cpu"),
     output_device: Optional[torch.device] = None,
 ) -> torch.Tensor: # shape: (n_q, n_r), dtype: float32
@@ -125,8 +125,8 @@ def embedding_similarity_cpu(
 def embedding_similarity_cuda(
     query: torch.Tensor,
     ref: torch.Tensor,
-    chunk_size: int = 5120,
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
+    chunk_size: int = 5120,
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> torch.Tensor:
@@ -179,8 +179,8 @@ def embedding_similarity_cuda(
 def embedding_similarity(
     query: torch.Tensor,
     ref: torch.Tensor,
-    chunk_size: int = 5120,
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
+    chunk_size: int = 5120,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
@@ -197,13 +197,13 @@ def embedding_similarity(
     # 分发到具体实现
     if _work_device.type.startswith('cuda'):
         return embedding_similarity_cuda(
-            query, ref, chunk_size, operator,
+            query, ref, operator, chunk_size,
             work_device=_work_device,
             output_device=_output_device
         )
     else:
         return embedding_similarity_cpu(
-            query, ref, chunk_size, operator,
+            query, ref, operator, chunk_size,
             work_device=_work_device,
             output_device=_output_device
         )
@@ -211,9 +211,9 @@ def embedding_similarity(
 def embedding_similarity_by_queue(
     query_queue: List[torch.Tensor],
     ref_queue: List[torch.Tensor],
+    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     chunk_size: int = 5120,
     num_workers: int = 4,
-    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,

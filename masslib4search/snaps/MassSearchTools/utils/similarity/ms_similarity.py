@@ -36,7 +36,7 @@ class MSEntropyOperator(SpectramSimilarityOperator):
 def spectrum_similarity_cpu(
     query: List[torch.Tensor], # List[(n_peaks, 2)]
     ref: List[torch.Tensor], # List[(n_peaks, 2)]
-    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = ms_entropy_similarity,
     num_dask_workers: int = 4,
     work_device: torch.device = torch.device("cpu"),
     output_device: Optional[torch.device] = None,
@@ -66,7 +66,7 @@ def spectrum_similarity_cpu(
 def spectrum_similarity_cpu_by_queue(
     query: List[List[torch.Tensor]],  # Queue[List[(n_peaks, 2)]]
     ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
-    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = ms_entropy_similarity,
     num_dask_workers: int = 4,
     work_device: torch.device = torch.device("cpu"),
     output_device: Optional[torch.device] = None,

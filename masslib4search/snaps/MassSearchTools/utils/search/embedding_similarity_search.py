@@ -5,15 +5,17 @@ from ..similarity.embedding_similarity import (
     EmbbedingSimilarityOperator,
     CosineOperator,
 )
-from typing import Tuple,Callable,Optional,Union,Literal
+import dask.bag as db
+from functools import partial
+from typing import Tuple,Callable,Optional,Union,Literal,List
     
 @torch.no_grad()
 def similarity_search_cpu(
     query: torch.Tensor, # shape: (n_q, dim), dtype: float32
     ref: torch.Tensor, # shape: (n_r, dim), dtype: float32
+    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
     top_k: Optional[int] = None,
     chunk_size: int = 5120,
-    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
     work_device: torch.device = torch.device("cpu"),
     output_device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -82,12 +84,12 @@ def similarity_search_cpu(
     return torch.cat(results, dim=0), torch.cat(indices_list, dim=0)
 
 @torch.no_grad()
-def similarity_search_gpu(
+def similarity_search_cuda(
     query: torch.Tensor, # shape: (n_q, dim), dtype: float32
     ref: torch.Tensor, # shape: (n_r, dim), dtype: float32
+    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
     top_k: Optional[int] = None,
     chunk_size: int = 5120,
-    sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -210,9 +212,9 @@ def similarity_search_gpu(
 def similarity_search(
     query: torch.Tensor,
     ref: torch.Tensor,
+    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     top_k: int = None,
     chunk_size: int = 5120,
-    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
@@ -226,11 +228,60 @@ def similarity_search(
     # 算子生成
     operator = sim_operator.get_operator(_work_device,operator_kwargs)
     
-    if query.device.type == 'cpu':
-        return similarity_search_cpu(
-            query, ref, top_k, chunk_size, operator, _work_device, _output_device
+    if query.device.type.startswith("cuda"):
+        return similarity_search_cuda(
+            query, ref, operator, top_k, chunk_size, _work_device, _output_device
         )
     else:
-        return similarity_search_gpu(
-            query, ref, top_k, chunk_size, operator, _work_device, _output_device
+        return similarity_search_cpu(
+            query, ref, operator, top_k, chunk_size, _work_device, _output_device
         )
+        
+def similarity_search_by_queue(
+    query_queue: List[torch.Tensor],
+    ref_queue: List[torch.Tensor],
+    sim_operator: EmbbedingSimilarityOperator = CosineOperator,
+    top_k: int = None,
+    chunk_size: int = 5120,
+    num_workers: int = 4,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    output_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    operator_kwargs: Optional[dict] = None,
+) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    
+    # 自动推断工作设备
+    _work_device = resolve_device(work_device, query_queue[0].device)
+    # 自动推断输出设备
+    _output_device = resolve_device(output_device, _work_device)
+    
+    # 算子生成
+    operator = sim_operator.get_operator(_work_device,operator_kwargs)
+    
+    # 构造工作函数
+    if _work_device.type.startswith('cuda'):
+        work_func = partial(
+            similarity_search_cuda,
+            sim_operator=operator,
+            top_k=top_k,
+            chunk_size=chunk_size,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+    else:
+        work_func = partial(
+            similarity_search_cpu,
+            sim_operator=operator,  
+            top_k=top_k,
+            chunk_size=chunk_size,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+    
+    # 任务分发
+    queue_bag = db.from_sequence(zip(query_queue, ref_queue), npartitions=num_workers)
+    queue_results = queue_bag.map(lambda x: work_func(x[0],x[1]))
+    
+    # 计算
+    results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+    
+    return results
