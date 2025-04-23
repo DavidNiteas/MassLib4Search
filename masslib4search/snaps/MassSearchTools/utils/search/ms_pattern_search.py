@@ -1,14 +1,14 @@
 import torch
-from .peak_search import mz_search,broadcast
+from .ms_peak_search import mz_search,broadcast
 import networkx as nx 
 from networkx.algorithms.isomorphism import GraphMatcher
 import pandas as pd
 from numba import njit
 import numpy as np
 import dask.bag as db
-from typing import List, Dict, Literal, Optional, Hashable
+from typing import List, Dict, Literal, Optional, Hashable, Union
 
-class AbstructSpectrumGraphWrapper:
+class SpectrumPatternWrapper:
     
     def __init__(
         self,
@@ -23,19 +23,12 @@ def get_loss_matrix(
     qry_mzs: torch.Tensor, # (n_mzs,)
 ) -> torch.Tensor: # (n_mzs, n_mzs)
     return torch.sub(*broadcast(qry_mzs, qry_mzs))
-        
-def infer_qry_graph(
-    refs: AbstructSpectrumGraphWrapper,
+
+def build_qry_graph(
     qry_mzs: torch.Tensor, # (n_mzs,)
-    loss_tolerance: float,
-    chunk_size: int = 5120,
+    refs: SpectrumPatternWrapper,
+    loss_edges: torch.Tensor, # (n_edges, 3[col0: upstream_node_idx, col1: downstream_node_idx, col2: ref_loss_idx])
 ) -> nx.Graph:
-    
-    # 获取边信息
-    LQ = get_loss_matrix(qry_mzs)
-    LR = torch.as_tensor(refs.losses.values, dtype=torch.float32, device=qry_mzs.device)
-    LI = mz_search(LQ,LR,loss_tolerance,"Da",chunk_size=chunk_size) 
-    #↑ col0: upstream_node_idx, col1: downstream_node_idx, col2: ref_loss_idx
     
     # 创建无向图
     qry_graph = nx.Graph()
@@ -45,8 +38,8 @@ def infer_qry_graph(
         qry_graph.add_node(idx, mz=float(mz))
     
     # 添加带edge_type属性的边
-    if LI.shape[0] > 0:
-        li_np = LI.cpu().numpy()
+    if loss_edges.shape[0] > 0:
+        li_np = loss_edges.cpu().numpy()
         
         for row in li_np:
             u = int(row[0])
@@ -57,17 +50,43 @@ def infer_qry_graph(
             qry_graph.add_edge(u, v, type=edge_type)
     
     return qry_graph
+        
+def infer_qry_graph(
+    qry_mzs: torch.Tensor, # (n_mzs,)
+    refs: SpectrumPatternWrapper,
+    loss_tolerance: float,
+    chunk_size: int = 5120,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
+) -> nx.Graph:
+    
+    # 获取边信息
+    LQ = get_loss_matrix(qry_mzs)
+    LR = torch.as_tensor(refs.losses.values, dtype=torch.float32, device=work_device)
+    LI = mz_search(LQ,LR,loss_tolerance,"Da",chunk_size=chunk_size, work_device=work_device, output_device=torch.device("cpu")) 
+    #↑ col0: upstream_node_idx, col1: downstream_node_idx, col2: ref_loss_idx
+    
+    # 构建查询图
+    qry_graph = build_qry_graph(qry_mzs, refs, LI)
+    
+    return qry_graph
 
 def infer_qry_graph_by_queue(
-    refs_queue: List[AbstructSpectrumGraphWrapper],
-    qry_mzs_queue: torch.Tensor, # (n_qrys,n_mzs,)
+    qry_mzs_queue: List[torch.Tensor],
+    refs_queue: List[SpectrumPatternWrapper],
     loss_tolerance: float,
     chunk_size: int = 5120,
     num_workers: Optional[int] = None,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
 ) -> List[nx.Graph]:
-    pair_bag = db.from_sequence(zip(qry_mzs_queue.unbind(0), refs_queue))
-    graph_bag = pair_bag.map(lambda x: infer_qry_graph(x[1], x[0], loss_tolerance, chunk_size))
-    graph_list = graph_bag.compute(scheduler='threads', num_workers=num_workers)
+    qry_mzs_bag = db.from_sequence(qry_mzs_queue)
+    LQ_bag = qry_mzs_bag.map(get_loss_matrix)
+    LR_bag = db.from_sequence(refs_queue).map(lambda x: torch.as_tensor(x.losses.values, dtype=torch.float32, device=work_device))
+    LQR_bag = db.zip(LQ_bag, LR_bag)
+    LI_bag = LQR_bag.map(lambda x: mz_search(*x, loss_tolerance, "Da", chunk_size=chunk_size, work_device=work_device, output_device=torch.device("cpu")))
+    LI_queue = LI_bag.compute(scheduler='threads', num_workers=num_workers)
+    pair_bag = db.from_sequence(zip(qry_mzs_queue, refs_queue, LI_queue))
+    graph_bag = pair_bag.map(lambda x: build_qry_graph(*x))
+    graph_list = graph_bag.compute(scheduler='processes', num_workers=num_workers)
     return graph_list
 
 @njit(cache=True)
@@ -86,13 +105,13 @@ def node_mz_ppm_match(
 ) -> bool:
     return (np.abs(qry_mz - ref_mz) / ref_mz) * 1e6 <= mz_tolerance
 
-def graph_match(
-    qrys: pd.Series,  # Series[nx.Graph]
-    refs: List[AbstructSpectrumGraphWrapper],
+def mz_pattern_search(
+    qrys: List[nx.Graph],
+    refs: List[SpectrumPatternWrapper],
     mz_tolerance: float,
     mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
     num_workers: Optional[int] = None,
-) -> pd.DataFrame: # columns: qry_ids, ref_ids
+) -> List[torch.Tensor]:
 
     # 动态构建节点匹配策略
     def node_match_builder(qry_node: Dict, ref_node: Dict) -> bool:
@@ -111,14 +130,13 @@ def graph_match(
 
     # 单个匹配任务处理函数
     def match_in_bag(
-        qry_id: Hashable, 
         qry_graph: nx.Graph, 
-        ref_wrapper: AbstructSpectrumGraphWrapper,
-    ) -> pd.DataFrame: # columns: qry_ids, ref_ids
+        ref_wrapper: SpectrumPatternWrapper,
+    ) -> torch.Tensor:
         
-        results = {"qry_ids":[], "ref_ids":[]}
+        results = []
         
-        for ref_id, ref_graph in ref_wrapper.graphs.items():
+        for i, ref_graph in enumerate(ref_wrapper.graphs):
             
             # 初始化匹配器
             matcher = GraphMatcher(
@@ -130,22 +148,18 @@ def graph_match(
             
             # 匹配
             if matcher.subgraph_is_monomorphic():
-                results['qry_ids'].append(qry_id)
-                results['ref_ids'].append(ref_id)
+                results.append(i)
                 
-        results = pd.DataFrame(results)
+        results = torch.as_tensor(results, dtype=torch.int64, device=torch.device("cpu"))
         
         return results
 
     # 构建并行任务Bag
-    qry_bag = db.from_sequence(qrys.items())
+    qry_bag = db.from_sequence(qrys)
     ref_bag = db.from_sequence(refs)
-    bag = qry_bag.product(ref_bag)
+    bag = db.zip(qry_bag, ref_bag)
 
     # 执行并行匹配
-    results = bag.map(lambda x: match_in_bag(x[0][0], x[0][1], x[1])).compute(scheduler='processes', num_workers=num_workers)
-
-    # 合并结果
-    results = pd.concat(results, ignore_index=True)
+    results = bag.map(lambda x: match_in_bag(x[0], x[1])).compute(scheduler='processes', num_workers=num_workers)
     
     return results
