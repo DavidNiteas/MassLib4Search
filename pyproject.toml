@@ -1,17 +1,17 @@
-[project]
+[tool.poetry]
 name = "masslib4search"
 version = "0.1.0"
-description = "A toolkit for building searchable mass spectrometry databases."
-authors = [
-    {name = "David Niteas",email = "david.ql.d@foxmail.com"}
-]
-license = {text = "MIT"}
+description = "A Python package for searching mass spectra and library building."
+authors = ["David Niteas <david.ql.d@foxmail.com>"]
+license = "MIT"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
+packages = [
+    { include = "masslib4search", from = "." },
 ]
 
+[tool.poetry.dependencies]
+python = "^3.10"
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
+requires = ["poetry-core>=2.0.0"]
 build-backend = "poetry.core.masonry.api"

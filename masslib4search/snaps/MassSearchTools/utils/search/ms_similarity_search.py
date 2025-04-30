@@ -8,7 +8,7 @@ from ..similarity.ms_similarity import (
 from typing import Tuple,Callable,Optional,Union,Literal,List
 
 @torch.no_grad()
-def spectrum_similarity_search_cpu(
+def spec_similarity_search_cpu(
     query: List[torch.Tensor], # List[(n_peaks, 2)]
     ref: List[torch.Tensor], # List[(n_peaks, 2)]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = ms_entropy_similarity,
@@ -19,7 +19,7 @@ def spectrum_similarity_search_cpu(
     pass
 
 @torch.no_grad()
-def spectrum_similarity_search_cpu_by_queue(
+def spec_similarity_search_cpu_by_queue(
     query: List[List[torch.Tensor]],  # Queue[List[(n_peaks, 2)]]
     ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = ms_entropy_similarity,
@@ -31,7 +31,7 @@ def spectrum_similarity_search_cpu_by_queue(
     pass
 
 @torch.no_grad()
-def spectrum_similarity_search_cuda(
+def spec_similarity_search_cuda(
     query: List[torch.Tensor], # List[(n_peaks, 2)]
     ref: List[torch.Tensor], # List[(n_peaks, 2)]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -42,7 +42,7 @@ def spectrum_similarity_search_cuda(
     pass
 
 @torch.no_grad()
-def spectrum_similarity_search_cuda_by_queue(
+def spec_similarity_search_cuda_by_queue(
     query: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -53,7 +53,7 @@ def spectrum_similarity_search_cuda_by_queue(
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
     pass
 
-def spectrum_similarity_search(
+def spec_similarity_search(
     query: List[torch.Tensor],
     ref: List[torch.Tensor],
     sim_operator: SpectramSimilarityOperator = MSEntropyOperator,
@@ -66,7 +66,7 @@ def spectrum_similarity_search(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     pass
 
-def spectrum_similarityy_search_by_queue(
+def spec_similarity_search_by_queue(
     query: List[List[torch.Tensor]],
     ref: List[List[torch.Tensor]],
     sim_operator: SpectramSimilarityOperator = MSEntropyOperator,

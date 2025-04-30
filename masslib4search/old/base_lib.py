@@ -646,7 +646,7 @@ class BaseLib(LibBase):
         table_replace: bool = True,
     ) -> None:
         schemas = self.to_row_major_schemas()
-        io.save_dfs_to_SQLite(path, schemas, chunk_size=chunk_size, max_workers=max_workers, table_replace=table_replace)
+        io.save_dfs_to_sqlite(path, schemas, chunk_size=chunk_size, max_workers=max_workers, table_replace=table_replace)
     
     @classmethod
     def from_SQLite(
@@ -655,5 +655,5 @@ class BaseLib(LibBase):
         chunk_size: int = 2048,
         max_workers: int = 8
     ) -> None:
-        schemas = io.load_dfs_from_SQLite(path,chunk_size=chunk_size,max_workers=max_workers)
+        schemas = io.load_dfs_from_sqlite(path,chunk_size=chunk_size,max_workers=max_workers)
         return cls.from_row_major_schemas(schemas)

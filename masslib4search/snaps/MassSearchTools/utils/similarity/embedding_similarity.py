@@ -1,103 +1,12 @@
 import torch
 from ..torch_device import resolve_device
-from .similarity_operator import EmbbedingSimilarityOperator
+from .operators import EmbbedingSimilarityOperator,CosineOperator,cosine
 from functools import partial
 import dask.bag as db
 from typing import Callable, Literal, Optional, Union, List
 
 @torch.no_grad()
-def tanimoto(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
-    """Tanimoto系数"""
-    vp = torch.sum(va.unsqueeze(-2) * vb.unsqueeze(-3), dim=-1)
-    vas = torch.sum(va**2, dim=-1, keepdim=True)
-    vbs = torch.sum(vb**2, dim=-1, keepdim=True)
-    return vp / (vas + vbs.transpose(-1,-2) - vp + 1e-6)
-
-class TanimodoOperator(EmbbedingSimilarityOperator):
-    
-    @classmethod
-    def cuda_operator(cls):
-        return tanimoto
-    
-    @classmethod
-    def cpu_operator(cls):
-        return tanimoto
-
-@torch.no_grad()
-def cosine(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
-    """余弦相似度"""
-    norm_a = torch.norm(va, p=2, dim=-1, keepdim=True)
-    norm_b = torch.norm(vb, p=2, dim=-1, keepdim=True)
-    return torch.matmul(va, vb.transpose(-1,-2)) / (norm_a * norm_b.transpose(-1,-2) + 1e-6)
-
-class CosineOperator(EmbbedingSimilarityOperator):
-    
-    @classmethod
-    def cuda_operator(cls):
-        return cosine
-    
-    @classmethod
-    def cpu_operator(cls):
-        return cosine
-
-@torch.no_grad()
-def dot(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
-    """点积"""
-    return torch.matmul(va, vb.transpose(-1,-2))
-
-class DotOperator(EmbbedingSimilarityOperator):
-    
-    @classmethod
-    def cuda_operator(cls):
-        return dot
-
-    @classmethod
-    def cpu_operator(cls):
-        return dot
-
-@torch.no_grad()
-def jaccard(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
-    """Jaccard系数"""
-    intersection = torch.logical_and(va.unsqueeze(-2), vb.unsqueeze(-3))
-    union = torch.logical_or(va.unsqueeze(-2), vb.unsqueeze(-3))
-    return torch.sum(intersection.float(), dim=-1) / (torch.sum(union.float(), dim=-1) + 1e-6)
-
-class JaccardOperator(EmbbedingSimilarityOperator):
-    
-    @classmethod
-    def cuda_operator(cls):
-        return jaccard
-
-    @classmethod
-    def cpu_operator(cls):
-        return jaccard
-
-@torch.no_grad()
-def pearson(va: torch.Tensor, vb: torch.Tensor) -> torch.Tensor:
-    """皮尔逊相关系数"""
-    mean_a = torch.mean(va, dim=-1, keepdim=True)
-    mean_b = torch.mean(vb, dim=-1, keepdim=True)
-    centered_a = va - mean_a
-    centered_b = vb - mean_b
-    numerator = torch.matmul(centered_a, centered_b.transpose(-1,-2))
-    denominator = torch.sqrt(
-        torch.sum(centered_a**2, dim=-1, keepdim=True) *
-        torch.sum(centered_b**2, dim=-1, keepdim=True).transpose(-1,-2)
-    )
-    return numerator / (denominator + 1e-6)
-
-class PearsonOperator(EmbbedingSimilarityOperator):
-    
-    @classmethod
-    def cuda_operator(cls):
-        return pearson
-
-    @classmethod
-    def cpu_operator(cls):
-        return pearson
-
-@torch.no_grad()
-def embedding_similarity_cpu(
+def emb_similarity_cpu(
     query: torch.Tensor, # shape: (n_q, dim), dtype: float32
     ref: torch.Tensor, # shape: (n_r, dim), dtype: float32
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
@@ -122,7 +31,7 @@ def embedding_similarity_cpu(
     return torch.cat(results).to(output_device)
 
 @torch.no_grad()
-def embedding_similarity_cuda(
+def emb_similarity_cuda(
     query: torch.Tensor,
     ref: torch.Tensor,
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
@@ -176,7 +85,7 @@ def embedding_similarity_cuda(
     
     return torch.cat(results).to(output_device)
 
-def embedding_similarity(
+def emb_similarity(
     query: torch.Tensor,
     ref: torch.Tensor,
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
@@ -196,19 +105,19 @@ def embedding_similarity(
     
     # 分发到具体实现
     if _work_device.type.startswith('cuda'):
-        return embedding_similarity_cuda(
+        return emb_similarity_cuda(
             query, ref, operator, chunk_size,
             work_device=_work_device,
             output_device=_output_device
         )
     else:
-        return embedding_similarity_cpu(
+        return emb_similarity_cpu(
             query, ref, operator, chunk_size,
             work_device=_work_device,
             output_device=_output_device
         )
         
-def embedding_similarity_by_queue(
+def emb_similarity_by_queue(
     query_queue: List[torch.Tensor],
     ref_queue: List[torch.Tensor],
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
@@ -232,7 +141,7 @@ def embedding_similarity_by_queue(
     # 构造工作函数
     if _work_device.type.startswith('cuda'):
         work_func = partial(
-            embedding_similarity_cuda,
+            emb_similarity_cuda,
             chunk_size=chunk_size,
             sim_operator=operator,
             work_device=_work_device,
@@ -240,7 +149,7 @@ def embedding_similarity_by_queue(
         )
     else:
         work_func = partial(
-            embedding_similarity_cpu,
+            emb_similarity_cpu,
             chunk_size=chunk_size,
             sim_operator=operator,
             work_device=_work_device,

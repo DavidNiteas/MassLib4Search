@@ -1,39 +1,13 @@
 import torch
 from ..torch_device import resolve_device
-from .similarity_operator import SpectramSimilarityOperator
-import ms_entropy as me
+from .operators import SpectramSimilarityOperator,MSEntropyOperator,ms_entropy_similarity
 import dask
 import dask.bag as db
 from itertools import cycle
 from typing import List, Callable, Optional, Union, Literal
-
-def ms_entropy_similarity(
-    query_spec: torch.Tensor, # (n_peaks, 2)
-    ref_spec: torch.Tensor, # (n_peaks, 2)
-) -> torch.Tensor: # zero-dimensional
-    print(query_spec.shape, ref_spec.shape)
-    sim = me.calculate_entropy_similarity(query_spec, ref_spec)
-    return torch.tensor(sim, device=query_spec.device)
-
-class MSEntropyOperator(SpectramSimilarityOperator):
-    
-    cpu_kwargs = {
-        "ms2_tolerance_in_da":0.02, 
-        "ms2_tolerance_in_ppm": -1, 
-        "clean_spectra": True,
-    }
-    dask_mode = "threads" # me.calculate_entropy_similarity是CPU函数，因此默认使用线程池
-    
-    @classmethod
-    def cpu_operator(cls):
-        return ms_entropy_similarity
-    
-    @classmethod
-    def cuda_operator(cls):
-        raise NotImplementedError(f"{cls.__name__} not supported on CUDA")
     
 @torch.no_grad()
-def spectrum_similarity_cpu(
+def spec_similarity_cpu(
     query: List[torch.Tensor], # List[(n_peaks, 2)]
     ref: List[torch.Tensor], # List[(n_peaks, 2)]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = ms_entropy_similarity,
@@ -63,7 +37,7 @@ def spectrum_similarity_cpu(
     
 
 @torch.no_grad()
-def spectrum_similarity_cpu_by_queue(
+def spec_similarity_cpu_by_queue(
     query: List[List[torch.Tensor]],  # Queue[List[(n_peaks, 2)]]
     ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = ms_entropy_similarity,
@@ -96,7 +70,7 @@ def spectrum_similarity_cpu_by_queue(
     return queue_results
 
 @torch.no_grad()
-def spectrum_similarity_cuda(
+def spec_similarity_cuda(
     query: List[torch.Tensor], # List[(n_peaks, 2)]
     ref: List[torch.Tensor], # List[(n_peaks, 2)]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -168,7 +142,7 @@ def spectrum_similarity_cuda(
     return results
 
 @torch.no_grad()
-def spectrum_similarity_cuda_by_queue(
+def spec_similarity_cuda_by_queue(
     query: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -179,13 +153,13 @@ def spectrum_similarity_cuda_by_queue(
 ) -> List[torch.Tensor]:
     
     block_bag = db.from_sequence(zip(query, ref), npartitions=num_dask_workers)
-    block_bag = block_bag.map(lambda x: spectrum_similarity_cuda(
+    block_bag = block_bag.map(lambda x: spec_similarity_cuda(
         x[0], x[1], sim_operator, num_cuda_workers, work_device, output_device
     ))
     results = block_bag.compute(scheduler='threads', num_workers=num_dask_workers)
     return results
 
-def spectrum_similarity(
+def spec_similarity(
     query: List[torch.Tensor],
     ref: List[torch.Tensor],
     sim_operator: SpectramSimilarityOperator = MSEntropyOperator,
@@ -206,14 +180,14 @@ def spectrum_similarity(
 
     # 分发实现
     if _work_device.type.startswith('cuda'):
-        return spectrum_similarity_cuda(
+        return spec_similarity_cuda(
             query, ref, operator,
             num_cuda_workers=num_cuda_workers,
             work_device=_work_device,
             output_device=_output_device
         )
     else:
-        return spectrum_similarity_cpu(
+        return spec_similarity_cpu(
             query, ref, operator,
             num_dask_workers=num_dask_workers,
             work_device=_work_device,
@@ -221,7 +195,7 @@ def spectrum_similarity(
             dask_mode=sim_operator.get_dask_mode(dask_mode)
         )
         
-def spectrum_similarity_by_queue(
+def spec_similarity_by_queue(
     query: List[List[torch.Tensor]],
     ref: List[List[torch.Tensor]],
     sim_operator: SpectramSimilarityOperator = MSEntropyOperator,
@@ -242,7 +216,7 @@ def spectrum_similarity_by_queue(
 
     # 分发实现
     if _work_device.type.startswith('cuda'):
-        return spectrum_similarity_cuda_by_queue(
+        return spec_similarity_cuda_by_queue(
             query, ref, operator,
             num_cuda_workers=num_cuda_workers,
             num_dask_workers=num_dask_workers,
@@ -250,7 +224,7 @@ def spectrum_similarity_by_queue(
             output_device=_output_device
         )
     else:
-        return spectrum_similarity_cpu_by_queue(
+        return spec_similarity_cpu_by_queue(
             query, ref, operator,
             num_dask_workers=num_dask_workers,
             work_device=_work_device,

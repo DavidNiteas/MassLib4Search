@@ -10,7 +10,7 @@ from functools import partial
 from typing import Tuple,Callable,Optional,Union,Literal,List
     
 @torch.no_grad()
-def similarity_search_cpu(
+def emb_similarity_search_cpu(
     query: torch.Tensor, # shape: (n_q, dim), dtype: float32
     ref: torch.Tensor, # shape: (n_r, dim), dtype: float32
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
@@ -84,7 +84,7 @@ def similarity_search_cpu(
     return torch.cat(results, dim=0), torch.cat(indices_list, dim=0)
 
 @torch.no_grad()
-def similarity_search_cuda(
+def emb_similarity_search_cuda(
     query: torch.Tensor, # shape: (n_q, dim), dtype: float32
     ref: torch.Tensor, # shape: (n_r, dim), dtype: float32
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
@@ -209,7 +209,7 @@ def similarity_search_cuda(
         torch.cat(all_indices, dim=0)
     )
 
-def similarity_search(
+def emb_similarity_search(
     query: torch.Tensor,
     ref: torch.Tensor,
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
@@ -229,15 +229,15 @@ def similarity_search(
     operator = sim_operator.get_operator(_work_device,operator_kwargs)
     
     if query.device.type.startswith("cuda"):
-        return similarity_search_cuda(
+        return emb_similarity_search_cuda(
             query, ref, operator, top_k, chunk_size, _work_device, _output_device
         )
     else:
-        return similarity_search_cpu(
+        return emb_similarity_search_cpu(
             query, ref, operator, top_k, chunk_size, _work_device, _output_device
         )
         
-def similarity_search_by_queue(
+def emb_similarity_search_by_queue(
     query_queue: List[torch.Tensor],
     ref_queue: List[torch.Tensor],
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
@@ -260,7 +260,7 @@ def similarity_search_by_queue(
     # 构造工作函数
     if _work_device.type.startswith('cuda'):
         work_func = partial(
-            similarity_search_cuda,
+            emb_similarity_search_cuda,
             sim_operator=operator,
             top_k=top_k,
             chunk_size=chunk_size,
@@ -269,7 +269,7 @@ def similarity_search_by_queue(
         )
     else:
         work_func = partial(
-            similarity_search_cpu,
+            emb_similarity_search_cpu,
             sim_operator=operator,  
             top_k=top_k,
             chunk_size=chunk_size,
