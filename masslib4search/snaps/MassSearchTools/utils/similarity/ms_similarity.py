@@ -65,7 +65,7 @@ def spec_similarity_cpu_by_queue(
     # 合并结果
     queue_results_bag = db.from_sequence(zip(queue_results,query,ref), npartitions=num_dask_workers)
     queue_results_bag = queue_results_bag.map(lambda x: torch.stack(x[0], dim=0).reshape(len(x[1]), len(x[2])))
-    queue_results = queue_results_bag.compute(scheduler='threads', num_workers=num_dask_workers)
+    queue_results = queue_results_bag.compute(scheduler=dask_mode, num_workers=num_dask_workers)
     
     return queue_results
 
