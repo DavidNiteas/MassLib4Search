@@ -43,22 +43,26 @@ def spec_similarity_search_cpu(
         
         for r_idx, r_spec in enumerate(ref):
             score = sim_operator(q_tensor, r_spec.to(work_device))
-            
-            # 仅处理可能进入TopK的情况
-            if score > scores_buf.min() or current_count < top_k:
-                # 合并到临时缓冲区
-                temp_scores = torch.cat([scores_buf[:current_count], score.unsqueeze(0)])
-                temp_indices = torch.cat([indices_buf[:current_count], 
-                                        torch.tensor([r_idx], device=work_device)])
-                
-                # 获取排序后的索引
-                sorted_idx = torch.argsort(temp_scores, descending=True)
-                
-                # 更新主缓冲区
-                keep = min(top_k, len(temp_scores))
-                scores_buf[:keep] = temp_scores[sorted_idx][:keep]
-                indices_buf[:keep] = temp_indices[sorted_idx][:keep]
-                current_count = min(current_count + 1, top_k)
+
+            # 阶段1：缓冲区未满时的快速写入
+            if current_count < top_k:
+                scores_buf[current_count] = score
+                indices_buf[current_count] = r_idx
+                current_count += 1
+
+            # 阶段2：缓冲区已满后的条件替换
+            else:
+                min_idx = torch.argmin(scores_buf)
+                if score > scores_buf[min_idx]:  # 只需比较当前最小值
+                    # 定点替换
+                    scores_buf[min_idx] = score
+                    indices_buf[min_idx] = r_idx
+        
+        # 后处理缓冲区 （排序）
+        valid_part = scores_buf[:current_count]
+        sorted_idx = torch.argsort(valid_part, descending=True)
+        scores_buf[:current_count] = valid_part[sorted_idx]
+        indices_buf[:current_count] = indices_buf[:current_count][sorted_idx]
 
         return scores_buf.to(output_device), indices_buf.to(output_device)
 
@@ -107,22 +111,26 @@ def spec_similarity_search_cpu_by_queue(
         
         for r_idx, r_spec in enumerate(ref[i]):
             score = sim_operator(q_tensor, r_spec.to(work_device))
-            
-            # 仅处理可能进入TopK的情况
-            if score > scores_buf.min() or current_count < top_k:
-                # 合并到临时缓冲区
-                temp_scores = torch.cat([scores_buf[:current_count], score.unsqueeze(0)])
-                temp_indices = torch.cat([indices_buf[:current_count], 
-                                        torch.tensor([r_idx], device=work_device)])
-                
-                # 获取排序后的索引
-                sorted_idx = torch.argsort(temp_scores, descending=True)
-                
-                # 更新主缓冲区
-                keep = min(top_k, len(temp_scores))
-                scores_buf[:keep] = temp_scores[sorted_idx][:keep]
-                indices_buf[:keep] = temp_indices[sorted_idx][:keep]
-                current_count = min(current_count + 1, top_k)
+
+            # 阶段1：缓冲区未满时的快速写入
+            if current_count < top_k:
+                scores_buf[current_count] = score
+                indices_buf[current_count] = r_idx
+                current_count += 1
+
+            # 阶段2：缓冲区已满后的条件替换
+            else:
+                min_idx = torch.argmin(scores_buf)
+                if score > scores_buf[min_idx]:  # 只需比较当前最小值
+                    # 定点替换
+                    scores_buf[min_idx] = score
+                    indices_buf[min_idx] = r_idx
+        
+        # 后处理缓冲区 （排序）
+        valid_part = scores_buf[:current_count]
+        sorted_idx = torch.argsort(valid_part, descending=True)
+        scores_buf[:current_count] = valid_part[sorted_idx]
+        indices_buf[:current_count] = indices_buf[:current_count][sorted_idx]
 
         return scores_buf.to(output_device), indices_buf.to(output_device)
     
@@ -150,27 +158,107 @@ def spec_similarity_search_cuda(
     ref: List[torch.Tensor], # List[(n_peaks, 2)]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     top_k: Optional[int] = None,
+    num_cuda_workers: int = 4,
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    pass
+    
+    output_device = output_device or work_device
+    top_k = top_k or len(ref)
+    
+    # 初始化CUDA流组（每个worker含3个流）
+    stream_groups = [(
+        torch.cuda.Stream(device=work_device),  # 数据转移流
+        torch.cuda.Stream(device=work_device),  # 计算流
+        torch.cuda.Stream(device=work_device)    # 缓冲区流
+    ) for _ in range(num_cuda_workers)]
+
+    # 预分配显存资源
+    score_buffers = [torch.full((top_k,), -float('inf'), device=work_device) for _ in range(num_cuda_workers)]
+    index_buffers = [torch.full((top_k,), -1, device=work_device, dtype=torch.long) for _ in range(num_cuda_workers)]
+    event_pool = [torch.cuda.Event() for _ in range(num_cuda_workers*2)]
+
+    # 异步执行容器
+    results = [None] * len(query)
+    
+    for query_idx, q in enumerate(query):
+        worker_id = query_idx % num_cuda_workers
+        data_stream, compute_stream, buffer_stream = stream_groups[worker_id]
+        event_idx = worker_id * 2
+
+        # 阶段1: 异步数据传输
+        with torch.cuda.stream(data_stream):
+            q_gpu = q.to(work_device, non_blocking=True)
+            ref_gpu = [r.to(work_device, non_blocking=True) for r in ref]
+            event_pool[event_idx].record(stream=data_stream)
+
+        # 阶段2: 异步计算
+        with torch.cuda.stream(compute_stream):
+            event_pool[event_idx].wait(stream=compute_stream)  # 等待数据就绪
+            scores = []
+            for r_idx, r in enumerate(ref_gpu):
+                scores.append(sim_operator(q_gpu, r))
+            event_pool[event_idx+1].record(stream=compute_stream)
+
+        # 阶段3: 异步缓冲区更新
+        with torch.cuda.stream(buffer_stream):
+            event_pool[event_idx+1].wait(stream=buffer_stream)  # 等待计算完成
+            current_count = 0
+            score_buf = score_buffers[worker_id].zero_()
+            index_buf = index_buffers[worker_id].zero_()
+            
+            for r_idx, score in enumerate(scores):
+                if current_count < top_k:
+                    score_buf[current_count] = score
+                    index_buf[current_count] = r_idx
+                    current_count += 1
+                else:
+                    min_idx = torch.argmin(score_buf)
+                    if score > score_buf[min_idx]:
+                        score_buf[min_idx] = score
+                        index_buf[min_idx] = r_idx
+            
+            # 异步排序
+            sorted_idx = torch.argsort(score_buf[:current_count], descending=True)
+            score_buf[:current_count] = score_buf[:current_count][sorted_idx]
+            index_buf[:current_count] = index_buf[:current_count][sorted_idx]
+
+            # 异步传回结果
+            results[query_idx] = (
+                score_buf.to(output_device, non_blocking=True),
+                index_buf.to(output_device, non_blocking=True)
+            )
+
+    # 同步所有流
+    torch.cuda.synchronize(work_device)
+    
+    # 组装最终结果
+    return torch.stack([r[0] for r in results]), torch.stack([r[1] for r in results])
 
 @torch.no_grad()
 def spec_similarity_search_cuda_by_queue(
     query: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     ref: List[List[torch.Tensor]], # Queue[List[(n_peaks, 2)]]
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    top_k: Optional[int] = None,
     num_cuda_workers: int = 4,
     num_dask_workers: int = 4,
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    pass
+
+    block_bag = db.from_sequence(zip(query, ref), npartitions=num_dask_workers)
+    block_bag = block_bag.map(lambda x: spec_similarity_search_cuda(
+        x[0], x[1], sim_operator, top_k, num_cuda_workers, work_device, output_device
+    ))
+    results = block_bag.compute(scheduler='threads', num_workers=num_dask_workers)
+    return results
 
 def spec_similarity_search(
     query: List[torch.Tensor],
     ref: List[torch.Tensor],
     sim_operator: SpectramSimilarityOperator = MSEntropyOperator,
+    top_k: Optional[int] = None,
     num_cuda_workers: int = 4,
     num_dask_workers: int = 4,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
@@ -178,12 +266,38 @@ def spec_similarity_search(
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    pass
+
+    # 设备推断
+    _work_device = resolve_device(work_device, query[0].device if query else torch.device('cpu'))
+    _output_device = resolve_device(output_device, _work_device)
+    
+    # 算子生成
+    operator = sim_operator.get_operator(_work_device,operator_kwargs)
+
+    # 分发实现
+    if _work_device.type.startswith('cuda'):
+        return spec_similarity_search_cuda(
+            query, ref, operator,
+            top_k=top_k,
+            num_cuda_workers=num_cuda_workers,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+    else:
+        return spec_similarity_search_cpu_by_queue(
+            query, ref, operator,
+            top_k=top_k,
+            num_dask_workers=num_dask_workers,
+            work_device=_work_device,
+            output_device=_output_device,
+            dask_mode=sim_operator.get_dask_mode(dask_mode)
+        )
 
 def spec_similarity_search_by_queue(
     query: List[List[torch.Tensor]],
     ref: List[List[torch.Tensor]],
     sim_operator: SpectramSimilarityOperator = MSEntropyOperator,
+    top_k: Optional[int] = None,
     num_cuda_workers: int = 4,
     num_dask_workers: int = 4,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
@@ -191,4 +305,30 @@ def spec_similarity_search_by_queue(
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    pass
+    
+    # 设备推断
+    _work_device = resolve_device(work_device, query[0][0].device if query else torch.device('cpu'))
+    _output_device = resolve_device(output_device, _work_device)
+    
+    # 算子生成
+    operator = sim_operator.get_operator(_work_device,operator_kwargs)
+    
+    # 分发实现
+    if _work_device.type.startswith('cuda'):
+        return spec_similarity_search_cuda_by_queue(
+            query, ref, operator,
+            top_k=top_k,
+            num_cuda_workers=num_cuda_workers,
+            num_dask_workers=num_dask_workers,
+            work_device=_work_device,
+            output_device=_output_device
+        )
+    else:
+        return spec_similarity_search_cpu_by_queue(
+            query, ref, operator,
+            top_k=top_k,
+            num_dask_workers=num_dask_workers,
+            work_device=_work_device,
+            output_device=_output_device,
+            dask_mode=sim_operator.get_dask_mode(dask_mode)
+        )

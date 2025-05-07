@@ -5,9 +5,9 @@ from .ABC_operator import SpectramSimilarityOperator
 def ms_entropy_similarity(
     query_spec: torch.Tensor, # (n_peaks, 2)
     ref_spec: torch.Tensor, # (n_peaks, 2)
+    **kwargs,
 ) -> torch.Tensor: # zero-dimensional
-    print(query_spec.shape, ref_spec.shape)
-    sim = me.calculate_entropy_similarity(query_spec, ref_spec)
+    sim = me.calculate_entropy_similarity(query_spec, ref_spec, **kwargs)
     return torch.tensor(sim, device=query_spec.device)
 
 class MSEntropyOperator(SpectramSimilarityOperator):
