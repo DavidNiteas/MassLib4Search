@@ -1,5 +1,5 @@
 import torch
-from ..utils.search.embedding_similarity_search import cosine_similarity_search
+from ...utils.search.embedding_similarity_search import emb_similarity_search
 import dask.bag as db
 import numpy as np
 import pandas as pd
@@ -32,7 +32,7 @@ def search_embeddings(
             runtime_ref_embeddings = all_ref_embeddings
         ref_embeddings = torch.as_tensor(runtime_ref_embeddings.values, device=device)
         if ref_embeddings.numel() != 0 and qry_embeddings.numel() != 0:
-            S, I = cosine_similarity_search(qry_embeddings, ref_embeddings, top_k=top_k, chunk_size=chunk_size)
+            S, I = emb_similarity_search(qry_embeddings, ref_embeddings, top_k=top_k, chunk_size=chunk_size)
             qry_ids = np.repeat(qry_embeddings_series.index.values, S.shape[1])
             ref_ids = runtime_ref_embeddings.index.values[I.flatten()]
             score = S.flatten().numpy()
