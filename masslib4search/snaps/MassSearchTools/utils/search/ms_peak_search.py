@@ -3,6 +3,7 @@ from ..torch_device import resolve_device
 from torch import Tensor
 import dask.bag as db
 from functools import partial
+import warnings
 from typing import Literal, Optional, Union, Tuple, List
 
 @torch.no_grad()
@@ -327,23 +328,49 @@ def mz_search_by_queue(
     _work_device = resolve_device(work_device, qry_ions_queue[0].device)
     _output_device = resolve_device(output_device, _work_device)
     
-    # 构造工作函数
-    if _work_device.type.startswith('cuda'):
-        work_func = partial(
-            mz_search_cuda,
+    if len(qry_ions_queue) > 1:
+    
+        # 构造工作函数
+        if _work_device.type.startswith('cuda'):
+            work_func = partial(
+                mz_search_cuda,
+                mz_tolerance=mz_tolerance,
+                mz_tolerance_type=mz_tolerance_type,
+                RT_tolerance=RT_tolerance,
+                adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
+                chunk_size=chunk_size,
+                work_device=_work_device,
+                output_device=_output_device
+            )
+        else:
+            work_func = partial(
+                mz_search_cpu,
+                mz_tolerance=mz_tolerance,
+                mz_tolerance_type=mz_tolerance_type,
+                RT_tolerance=RT_tolerance,
+                adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
+                chunk_size=chunk_size,
+                work_device=_work_device,
+                output_device=_output_device
+            )
+            
+        # 任务分发
+        query_RTs_queue = query_RTs_queue or [None] * len(qry_ions_queue)
+        ref_RTs_queue = ref_RTs_queue or [None] * len(ref_mzs_queue)
+        queue_bag = db.from_sequence(zip(qry_ions_queue, ref_mzs_queue, query_RTs_queue, ref_RTs_queue), npartitions=num_workers)
+        queue_results = queue_bag.map(lambda x: work_func(x[0],x[1],query_RTs=x[2],ref_RTs=x[3]))
+        
+        # 计算
+        results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+        
+    elif len(qry_ions_queue) == 1:
+        
+        results = mz_search(
+            qry_ions_queue[0], ref_mzs_queue[0],
             mz_tolerance=mz_tolerance,
             mz_tolerance_type=mz_tolerance_type,
-            RT_tolerance=RT_tolerance,
-            adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
-            chunk_size=chunk_size,
-            work_device=_work_device,
-            output_device=_output_device
-        )
-    else:
-        work_func = partial(
-            mz_search_cpu,
-            mz_tolerance=mz_tolerance,
-            mz_tolerance_type=mz_tolerance_type,
+            query_RTs=query_RTs_queue[0] if query_RTs_queue is not None else None,
+            ref_RTs=ref_RTs_queue[0] if ref_RTs_queue is not None else None,
             RT_tolerance=RT_tolerance,
             adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
             chunk_size=chunk_size,
@@ -351,13 +378,9 @@ def mz_search_by_queue(
             output_device=_output_device
         )
         
-    # 任务分发
-    query_RTs_queue = query_RTs_queue or [None] * len(qry_ions_queue)
-    ref_RTs_queue = ref_RTs_queue or [None] * len(ref_mzs_queue)
-    queue_bag = db.from_sequence(zip(qry_ions_queue, ref_mzs_queue, query_RTs_queue, ref_RTs_queue), npartitions=num_workers)
-    queue_results = queue_bag.map(lambda x: work_func(x[0],x[1],query_RTs=x[2],ref_RTs=x[3]))
-    
-    # 计算
-    results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+    else:
+        
+        warnings.warn("Empty query or reference set, return empty results.")
+        results = []
     
     return results
