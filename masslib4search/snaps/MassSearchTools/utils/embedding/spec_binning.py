@@ -36,8 +36,8 @@ def binning_step(
     elif pool_method == "max":
         expanded_intensity = padded_intensity.unsqueeze(-1) * mask  # [n_spec, num_peaks, num_bins]
         return torch.where(mask.any(dim=1), 
-                          expanded_intensity.max(dim=1).values, 
-                          torch.zeros_like(expanded_intensity[:,0,:]))
+                            expanded_intensity.max(dim=1).values, 
+                            torch.zeros_like(expanded_intensity[:,0,:]))
     elif pool_method == "avg":
         sum_result = torch.einsum('spb,sp->sb', mask, padded_intensity)
         counts = mask.sum(dim=1)  # [n_spec, num_bins]
