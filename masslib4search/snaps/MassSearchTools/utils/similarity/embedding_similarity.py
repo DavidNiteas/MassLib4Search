@@ -3,6 +3,7 @@ from ..torch_device import resolve_device
 from .operators import EmbbedingSimilarityOperator,CosineOperator,cosine
 from functools import partial
 import dask.bag as db
+import warnings
 from typing import Callable, Literal, Optional, Union, List
 
 @torch.no_grad()
@@ -155,12 +156,24 @@ def emb_similarity_by_queue(
             work_device=_work_device,
             output_device=_output_device
         )
-        
-    # 任务分发
-    queue_bag = db.from_sequence(zip(query_queue, ref_queue), npartitions=num_workers)
-    queue_results = queue_bag.map(lambda x: work_func(x[0],x[1]))
     
-    # 计算
-    results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+    # 任务分发
+    if len(query_queue) > 1:
+        
+        # dask分发
+        queue_bag = db.from_sequence(zip(query_queue, ref_queue), npartitions=num_workers)
+        queue_results = queue_bag.map(lambda x: work_func(x[0],x[1]))
+        
+        # 计算
+        results = queue_results.compute(scheduler='threads', num_workers=num_workers)
+        
+    elif len(query_queue) == 1:
+        
+        results = [work_func(query_queue[0], ref_queue[0])]
+        
+    else:
+        
+        warnings.warn("Empty query queue, return empty result.")
+        results = []
     
     return results

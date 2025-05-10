@@ -19,12 +19,8 @@ def test_binning(query_spec_queue, device_config):
         "num_workers": 4
     }
     
-    # 生成频谱队列
-    mzs_queue, intensities_queue = split_spectrum_by_queue(query_spec_queue)
-    
     # 执行带设备参数的binning
     binned_spectrum = binning(
-        mzs_queue,
-        intensities_queue,
+        query_spec_queue,
         **{**base_params, **device_config}  # 合并参数
     )

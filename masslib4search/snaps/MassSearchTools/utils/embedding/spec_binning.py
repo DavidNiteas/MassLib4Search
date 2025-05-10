@@ -2,6 +2,7 @@ import torch
 import dask.bag as db
 from torch.nested import nested_tensor
 from ..torch_device import resolve_device
+from ..spectrum_tools import split_spectrum_by_queue
 from typing import Literal,List,Optional,Tuple,Union
 
 @torch.no_grad()
@@ -181,8 +182,8 @@ def binning_cuda(
     return torch.cat(results, dim=0)
 
 def binning(
-    mzs: List[torch.Tensor],
-    intensities: List[torch.Tensor],
+    spec_or_mzs: List[torch.Tensor],
+    intensities: Optional[List[torch.Tensor]] = None,
     binning_window: Tuple[float,float,float] = (50.0, 1000.0, 1.0),
     pool_method: Literal['sum','max', 'avg'] = "sum",
     batch_size: int = 128,
@@ -191,6 +192,20 @@ def binning(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
 ) -> torch.Tensor:
     
+    # 输入模式判断
+    if intensities is None:
+        # Spec模式输入校验
+        assert all(t.ndim == 2 and t.shape[1] == 2 for t in spec_or_mzs), \
+            "Spec模式输入需要形状为(n_peaks,2)的张量列表"
+        mzs, intensities = split_spectrum_by_queue(spec_or_mzs)
+    else:
+        # MZ+Intens模式输入校验
+        assert all(t.ndim == 1 for t in spec_or_mzs), \
+            "MZ模式输入需要形状为(n_peaks,)的张量列表"
+        assert len(spec_or_mzs) == len(intensities), \
+            "m/z和强度列表长度必须一致"
+        mzs = spec_or_mzs
+        
     # 参数校验
     assert len(binning_window) == 3, "分箱窗口需要包含三个参数（min_mz, max_mz, bin_size）"
     min_mz, max_mz, bin_size = binning_window
@@ -228,3 +243,4 @@ def binning(
             work_device=_work_device,
             output_device=_output_device
         )
+        
