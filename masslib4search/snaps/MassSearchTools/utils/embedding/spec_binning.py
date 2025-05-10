@@ -72,8 +72,8 @@ def binning_cpu(
         mz_batch = list(mz_batch)  # 转换为列表
         intensity_batch = list(intensity_batch)  # 转换为列表
         
-        nt_mz = nested_tensor(mz_batch,device=work_device)
-        nt_intensity = nested_tensor(intensity_batch)
+        nt_mz = nested_tensor(mz_batch,device=work_device,layout=torch.jagged)
+        nt_intensity = nested_tensor(intensity_batch,layout=torch.jagged)
         
         padded_mz = nt_mz.to_padded_tensor(0.0)
         padded_intensity = nt_intensity.to_padded_tensor(0.0)
