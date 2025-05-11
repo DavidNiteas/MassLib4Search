@@ -2,7 +2,7 @@ import torch
 import dask.bag as db
 from torch.nested import nested_tensor
 from ..torch_device import resolve_device
-from ..spectrum_tools import split_spectrum_by_queue
+from ..spectrum_tools import split_spectrum_by_queue, flatten_sequence, restructure_sequence
 from typing import Literal,List,Optional,Tuple,Union
 
 @torch.no_grad()
@@ -191,6 +191,29 @@ def binning(
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
 ) -> torch.Tensor:
+    '''
+    质谱数据分箱处理核心函数
+    
+    将输入的质谱数据(m/z和强度)按指定窗口参数进行分箱聚合，支持CPU/CUDA加速
+    
+    Args:
+        spec_or_mzs: 输入数据，支持两种模式：
+            - Spec模式: 形状为[(n_peaks,2),...]的张量列表，第二列包含m/z和强度
+            - MZ模式: 形状为[(n_peaks,),...]的m/z列表 + 独立强度列表
+        intensities: 强度数据列表，当使用MZ模式时需提供
+        binning_window: 分箱窗口参数，格式为(最小值, 最大值, 步长)
+        pool_method: 聚合方法，支持'sum'/'max'/'avg'三种模式
+        batch_size: 并行处理的批次大小
+        num_workers: 数据加载的工作线程数
+        work_device: 计算设备（自动推断策略：优先使用输入数据所在设备）
+        output_device: 结果存储设备（默认与计算设备一致）
+
+    Returns:
+        torch.Tensor: 分箱后的强度向量，形状为(bins,)
+
+    Raises:
+        AssertionError: 输入数据格式不符合要求时触发
+    '''
     
     # 输入模式判断
     if intensities is None:
@@ -244,3 +267,41 @@ def binning(
             output_device=_output_device
         )
         
+def binning_by_queue(
+    spec_or_mzs: List[List[torch.Tensor]],
+    intensities: Optional[List[List[torch.Tensor]]] = None,
+    binning_window: Tuple[float,float,float] = (50.0, 1000.0, 1.0),
+    pool_method: Literal['sum','max', 'avg'] = "sum",
+    batch_size: int = 128,
+    num_workers: int = 4,
+    work_device: Union[str, torch.device, Literal['auto']] = 'auto',
+    output_device: Union[str, torch.device, Literal['auto']] = 'auto',
+) -> List[torch.Tensor]:
+    '''
+    嵌套结构质谱数据分箱处理
+    
+    支持处理具有层级结构的输入数据（如多个样本的批次数据），
+    自动进行扁平化处理并保持原始结构
+    
+    Args:
+        spec_or_mzs: 嵌套结构的输入数据，形状为[[(n_peaks,2),...],...]
+        intensities: 嵌套结构的强度数据（当使用MZ模式时需提供）
+        其他参数同binning函数
+
+    Returns:
+        List[torch.Tensor]: 保持原始嵌套结构的分箱结果列表
+    '''
+    spec_or_mzs,structure = flatten_sequence(spec_or_mzs)
+    if intensities is not None:
+        intensities,_ = flatten_sequence(intensities)
+    flattend_results = binning(
+        spec_or_mzs=spec_or_mzs,
+        intensities=intensities,
+        binning_window=binning_window,
+        pool_method=pool_method,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        work_device=work_device,
+        output_device=output_device,
+    )
+    return restructure_sequence(flattend_results,structure)

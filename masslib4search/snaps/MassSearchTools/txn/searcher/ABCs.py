@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from pydantic import BaseModel
+from pydantic import BaseModel,ConfigDict
 from typing import TypeVar, Type, Dict, Tuple, Any, Optional, List, Sequence
 
 data_entity_type = TypeVar('data_entity_type', bound='SearchDataEntity')
@@ -9,10 +9,9 @@ results_entity_type = TypeVar('results_entity_type', bound='SearchResultsEntity'
 class SearchDataEntity(BaseModel, ABC):
     
     # pydantic config
-    model_config = dict(extra='forbid')
+    model_config = ConfigDict(extra='forbid',slots=True)
     
     # instance variables
-    __slots__ = ['query_id', 'ref_id']
     query_ids: Optional[List[Optional[Sequence]]] = None
     ref_ids: Optional[List[Optional[Sequence]] ]= None
     
@@ -61,14 +60,13 @@ class SearchResultsEntity(BaseModel, ABC):
 class Searcher(BaseModel,ABC):
     
     # pydantic config
-    model_config = dict(extra='forbid')
+    model_config = ConfigDict(extra='forbid',slots=True)
     
     # class variables
     input_type = SearchDataEntity
     results_type = SearchResultsEntity
     
     # instance variables
-    __slots__ = ['config']
     config: SearchConfigEntity
     
     def check_data(self,data: SearchDataEntity):

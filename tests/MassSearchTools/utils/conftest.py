@@ -3,7 +3,7 @@ import torch
 from typing import List
 
 @pytest.fixture(scope='session')
-def query_spec_queue() -> List[torch.Tensor]:
+def query_spec() -> List[torch.Tensor]:
     return [
         torch.tensor([
             [149.05970595,0.5],
@@ -17,7 +17,7 @@ def query_spec_queue() -> List[torch.Tensor]:
     ] * 2
     
 @pytest.fixture(scope='session')
-def ref_spec_queue() -> List[torch.Tensor]:
+def ref_spec() -> List[torch.Tensor]:
     return [
         torch.tensor([ # 与query完全一样
             [149.05970595,0.5],
@@ -54,3 +54,11 @@ def ref_spec_queue() -> List[torch.Tensor]:
             [423.22207982,1.0],
         ]),
     ]
+    
+@pytest.fixture(scope='session')
+def query_spec_queue(query_spec) -> List[List[torch.Tensor]]:
+    return [query_spec] * 2
+
+@pytest.fixture(scope='session')
+def ref_spec_queue(ref_spec) -> List[List[torch.Tensor]]:
+    return [ref_spec] * 2

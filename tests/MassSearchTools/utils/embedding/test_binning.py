@@ -1,6 +1,5 @@
 import pytest
-from masslib4search.snaps.MassSearchTools.utils.embedding import binning
-from masslib4search.snaps.MassSearchTools.utils.spectrum_tools import split_spectrum_by_queue
+from masslib4search.snaps.MassSearchTools.utils.toolbox import Binning
 
 @pytest.mark.MassSearchTools_utils_embedding
 @pytest.mark.parametrize("device_config", [
@@ -19,8 +18,8 @@ def test_binning(query_spec_queue, device_config):
         "num_workers": 4
     }
     
-    # 执行带设备参数的binning
-    binned_spectrum = binning(
-        query_spec_queue,
+    # 初始化工具箱
+    binning_toolbox = Binning(
         **{**base_params, **device_config}  # 合并参数
     )
+    binning_toolbox.run_by_queue(query_spec_queue)
