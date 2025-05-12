@@ -286,7 +286,7 @@ nested_result = embedding_similarity_tool.run_by_queue(query_queue, ref_queue)
 | dask_mode | Literal["threads", "processes", "single-threaded"] | "threads" | - | Dask任务调度模式 |
 
 **预定义算子**
-在masslib4search/snaps/MassSearchTools/utils/similarity/operators.py中预定义：
+在masslib4search/snaps/MassSearchTools/utils/similarity/operators中预定义：
   - MSEntropyOperator (默认使用)：质谱熵相似度算法
 
 所有谱图相似度算子均继承自`SpectramSimilarityOperator`，支持通过继承实现自定义算法，详细接口参见masslib4search/snaps/MassSearchTools/utils/similarity/operators/ABC_operator.py
