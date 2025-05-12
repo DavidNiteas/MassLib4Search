@@ -14,6 +14,7 @@
 以下是可用的工具函数组：
 
 - [`Binning`](#binning-anchor)：质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
+- [`EmbeddingSimilarity`](#embedding-similarity-anchor)：嵌入向量相似度计算工具。
 
 ### <a id="binning-anchor"></a> Binning
 质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
@@ -140,3 +141,118 @@ result = binning_tool.run(spec_data)
 # 处理嵌套结构数据
 nested_result = binning_tool.run_by_queue(nested_spec_data)
 ```
+
+### <a id="embedding-similarity-anchor"></a> EmbeddingSimilarity
+嵌入向量相似度计算工具盒，输入向量并指定相似度，计算Query与Ref之间的相似度矩阵。
+
+#### 核心功能
+- 封装嵌入向量相似度计算流程
+- 提供配置化的计算参数管理
+- 支持设备自动分配策略
+- 批处理并行计算
+- 嵌套数据结构处理
+
+#### 配置参数
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| sim_operator | Type[EmbbedingSimilarityOperator] | CosineOperator | 用于计算嵌入向量之间相似度的算子 |
+| chunk_size | int | 5120 | 并行计算时每次处理的向量块大小 |
+| batch_size | int | 128 | 并行计算批次大小 |
+| num_workers | int | 4 | 数据预处理并行度 |
+| work_device | Union[str, torch.device, Literal['auto']] | 'auto' | 计算设备（自动推断策略：优先使用输入数据所在设备） |
+| output_device | Union[str, torch.device, Literal['auto']] | 'auto' | 结果存储设备（默认与计算设备一致） |
+| operator_kwargs | Optional[dict] | None | 相似度计算算子的额外参数 |
+
+**相似度算子**
+
+在masslib4search/snaps/MassSearchTools/utils/similarity/operators.py中，我们预定义了以下算子：
+  - CosineOperator (默认使用)：余弦相似度
+  - DotOperator：点积
+  - JaccardOperator：杰卡德相似度
+  - TanimotoOperator：谷本系数
+  - PearsonOperator：皮尔逊相关系数
+
+所有计算向量相似度的算子均是`EmbbedingSimilarityOperator`的子类，用户可以自定义算子实现自定义相似度计算。
+`EmbbedingSimilarityOperator`类的详细接口见masslib4search/snaps/MassSearchTools/utils/similarity/operators/ABC_operator.py
+
+
+#### 数据输入
+`EmbeddingSimilarity`工具支持两种输入模式：
+
+1. **单层结构输入**:
+   - 输入格式: `query: torch.Tensor`, `ref: torch.Tensor`
+   - 形状: 
+     - `query`: (n_q, dim)
+     - `ref`: (n_r, dim)
+   - 数据类型: `torch.float32`
+   - 示例:
+     ```python
+     query = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+     ref = torch.tensor([[5.0, 6.0], [7.0, 8.0]])
+     ```
+
+2. **嵌套结构输入**:
+   - 输入格式: `query_queue: List[torch.Tensor]`, `ref_queue: List[torch.Tensor]`
+   - 形状: 
+     - 每个`query_queue`元素: (n_q, dim)
+     - 每个`ref_queue`元素: (n_r, dim)
+   - 数据类型: `torch.float32`
+   - 适用于处理多个样本或实验的批量相似度计算操作
+   - 示例:
+     ```python
+     query_queue = [
+         torch.tensor([[1.0, 2.0], [3.0, 4.0]]),  # 查询组1
+         torch.tensor([[5.0, 6.0], [7.0, 8.0]])   # 查询组2
+     ]
+     ref_queue = [
+         torch.tensor([[9.0, 10.0], [11.0, 12.0]]),  # 参考组1
+         torch.tensor([[13.0, 14.0], [15.0, 16.0]])   # 参考组2
+     ]
+     ```
+
+#### 数据输出
+`EmbeddingSimilarity`工具的输出格式根据调用方法不同而有所区别：
+
+1. **run()方法输出** (单层结构处理):
+   - 输出类型: `torch.Tensor`
+   - 形状: `(n_q, n_r)`
+   - 数据类型: `torch.float32`
+   - 设备位置: 默认与计算设备相同，可通过`output_device`参数指定
+   - 示例:
+     ```python
+     # 输入2个查询向量和2个参考向量 → 相似度矩阵 (2x2)
+     output.shape  # torch.Size([2, 2])
+     ```
+
+2. **run_by_queue()方法输出** (嵌套结构处理):
+   - 输出类型: `List[torch.Tensor]`
+   - 结构特点: 保持与输入相同的嵌套层级
+   - 每个元素的形状: `(n_q, n_r)`
+   - 示例:
+     ```python
+     # 输入结构: [ [查询组1,查询组2], [查询组3] ]
+     output = [
+         torch.Size([2, 2]),  # 第一组结果
+         torch.Size([1, 2])   # 第二组结果
+     ]
+     ```
+
+#### 使用示例
+```python
+from masslib4search.snaps.MassSearchTools.utils.toolbox import EmbeddingSimilarity
+
+# 初始化工具
+embedding_similarity_tool = EmbeddingSimilarity(
+    sim_operator=CosineOperator,
+    chunk_size=5120,
+    batch_size=128,
+    num_workers=4,
+    work_device='auto',
+    operator_kwargs=None
+)
+
+# 处理单层结构数据
+result = embedding_similarity_tool.run(query, ref)
+
+# 处理嵌套结构数据
+nested_result = embedding_similarity_tool.run_by_queue(query_queue, ref_queue)

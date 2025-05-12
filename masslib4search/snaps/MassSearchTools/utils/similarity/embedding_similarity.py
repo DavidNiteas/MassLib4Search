@@ -95,6 +95,23 @@ def emb_similarity(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
 ) -> torch.Tensor:
+    
+    """计算查询向量和参考向量之间的相似度矩阵。
+    
+    该函数自动根据设备类型选择CPU或GPU实现，支持分块计算以处理大规模数据。
+    
+    Args:
+        query: 查询向量张量，形状为(n_query, dim)
+        ref: 参考向量张量，形状为(n_ref, dim)
+        sim_operator: 相似度计算算子，默认为余弦相似度
+        chunk_size: 分块大小，用于内存优化，默认为5120
+        work_device: 计算设备，可以是'auto'、'cpu'、'cuda'或torch.device对象
+        output_device: 输出设备，可以是'auto'、'cpu'、'cuda'或torch.device对象
+        operator_kwargs: 传递给相似度算子的额外参数
+        
+    Returns:
+        torch.Tensor: 相似度矩阵，形状为(n_query, n_ref)
+    """
 
     # 自动推断工作设备
     _work_device = resolve_device(work_device, query.device)
@@ -128,6 +145,24 @@ def emb_similarity_by_queue(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
 ) -> List[torch.Tensor]:
+    
+    """批量计算多组查询和参考向量之间的相似度矩阵。
+    
+    该函数使用多线程并行处理多个相似度计算任务，自动根据设备类型选择最佳实现。
+    
+    Args:
+        query_queue: 查询向量张量列表，每个张量形状为(n_query, dim)
+        ref_queue: 参考向量张量列表，每个张量形状为(n_ref, dim)
+        sim_operator: 相似度计算算子，默认为余弦相似度
+        chunk_size: 分块大小，用于内存优化，默认为5120
+        num_workers: 并行工作线程数，默认为4
+        work_device: 计算设备，可以是'auto'、'cpu'、'cuda'或torch.device对象
+        output_device: 输出设备，可以是'auto'、'cpu'、'cuda'或torch.device对象
+        operator_kwargs: 传递给相似度算子的额外参数
+        
+    Returns:
+        List[torch.Tensor]: 相似度矩阵列表，每个矩阵形状为(n_query, n_ref)
+    """
     
     # 合法性检查
     assert len(query_queue) == len(ref_queue)
