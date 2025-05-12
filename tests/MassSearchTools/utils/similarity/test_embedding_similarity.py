@@ -1,5 +1,5 @@
 import pytest
-from masslib4search.snaps.MassSearchTools.utils.toolbox import Binning, EmbeddingSimilarity
+from masslib4search.snaps.MassSearchTools.utils.toolbox import SpectrumBinning, EmbeddingSimilarity
 from masslib4search.snaps.MassSearchTools.utils.similarity.operators import CosineOperator
 import torch
 
@@ -21,7 +21,7 @@ def test_embedding_similarity(query_spec_queue, ref_spec_queue, device_config):
     }
     
     # 初始化Binning工具箱
-    binning_toolbox = Binning(
+    binning_toolbox = SpectrumBinning(
         **{**binning_base_params, **device_config}  # 合并参数
     )
     

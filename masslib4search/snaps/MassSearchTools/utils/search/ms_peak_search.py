@@ -270,6 +270,35 @@ def mz_search(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
+    """
+    执行基于 m/z 和保留时间（RT）的质谱数据匹配搜索，自动选择 CPU 或 CUDA 实现。
+    
+    参数:
+        qry_ions (Tensor): 查询离子（目标）的 m/z 值张量，形状为 (N_q,)
+        ref_mzs (Tensor): 参考库（数据库）的 m/z 值张量，形状为 (N_r,)
+        mz_tolerance (float): m/z 容差阈值，默认 3（ppm或Da）
+        mz_tolerance_type (Literal): 容差类型，'ppm'（百万分比）或 'Da'（绝对质量差）
+        query_RTs (Optional[Tensor]): 查询离子的保留时间（RT）张量，形状需与 qry_ions 一致
+        ref_RTs (Optional[Tensor]): 参考库的保留时间（RT）张量，形状需与 ref_mzs 一致
+        RT_tolerance (float): RT 容差阈值（单位需与输入一致），默认 0.1
+        adduct_co_occurrence_threshold (int): 加合物共现过滤阈值，仅保留出现次数≥此值的匹配
+        chunk_size (int): 分块处理大小，用于内存优化，默认 5120
+        work_device (Union): 计算设备（'auto' 自动推断，或指定 torch.device）
+        output_device (Union): 输出设备（'auto' 自动推断，或指定 torch.device）
+
+    返回:
+        Tuple[Tensor, Tensor]:
+            - 匹配索引张量：形状为 (M, 2)，每行为 (qry_idx, ref_idx)
+            - 匹配误差张量：形状为 (M,)，对应每个匹配的 m/z 误差（ppm或Da）
+
+    功能:
+        1. 自动根据设备选择 CPU/GPU 实现
+        2. 分块广播计算 m/z 和 RT 的绝对误差
+        3. 应用容差阈值过滤无效匹配
+        4. 执行加合物共现频率过滤（可选）
+        5. 结果自动迁移到指定输出设备
+    """
+    
     # 设备自动推断
     _work_device = resolve_device(work_device, qry_ions.device)
     _output_device = resolve_device(output_device, _work_device)
@@ -316,6 +345,28 @@ def mz_search_by_queue(
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
 ) -> List[Tuple[torch.Tensor,torch.Tensor]]:
+    
+    """
+    批量执行多个 mz_search 任务，支持并行计算。
+    
+    参数:
+        qry_ions_queue (List[Tensor]): 多个查询离子组的列表（每个元素对应一次搜索）
+        ref_mzs_queue (List[Tensor]): 多个参考库组的列表（与 qry_ions_queue 一一对应）
+        query_RTs_queue (Optional[List): 多个查询 RT 组的列表（可选，需与 qry_ions_queue 对齐）
+        ref_RTs_queue (Optional[List): 多个参考 RT 组的列表（可选，需与 ref_mzs_queue 对齐）
+        num_workers (int): 并行任务数，默认 4
+        其他参数与 mz_search 一致
+
+    返回:
+        List[Tuple]: 每个元素为对应任务的 (indices, deltas) 结果元组
+
+    功能:
+        1. 使用 Dask 实现多任务并行处理
+        2. 自动分发任务到 CPU 线程池或 GPU 流
+        3. 支持异构设备任务队列处理
+        4. 输入输出队列长度自动校验
+        
+    """
     
     # 合法性检查
     assert len(qry_ions_queue) == len(ref_mzs_queue)

@@ -16,6 +16,7 @@
 - [`SpectrumBinning`](#binning-anchor)：质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
 - [`EmbeddingSimilarity`](#embedding-similarity-anchor)：嵌入向量相似度计算工具，输出二维相似度矩阵。
 - [`SpectrumSimilarity`](#spectrum-similarity-anchor)：谱图相似度计算工具，输出二维相似度矩阵。
+- [`PeakMZSearch`](#peak-mz-search-anchor)：基于m/z值的质谱峰搜索工具箱，封装m/z峰搜索流程，提供配置化的计算参数管理。
 
 对于这些工具函数组的命名上也有一些约定：
 - Embedding~：表示这个工具函数组的输入为规整的向量格式，最小处理单元为embedding-chunk。
@@ -386,3 +387,145 @@ result = spectrum_similarity_tool.run(query, ref)
 # 处理嵌套结构数据
 nested_result = spectrum_similarity_tool.run_by_queue(query_queue, ref_queue)
 ```
+
+### <a id="peak-mz-search-anchor"></a> PeakMZSearch
+基于m/z值的质谱峰搜索工具箱，封装m/z峰搜索流程，提供配置化的计算参数管理。
+
+#### 核心功能
+- 封装m/z峰搜索流程
+- 提供配置化的计算参数管理
+- 支持设备自动分配策略
+- 批处理并行计算
+- 嵌套数据结构处理
+
+#### 配置参数
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| mz_tolerance | float | 3 | m/z容差值（ppm或Da） |
+| mz_tolerance_type | Literal['ppm', 'Da'] | 'ppm' | 容差类型 |
+| RT_tolerance | float | 0.1 | RT容差值（以min为单位） |
+| adduct_co_occurrence_threshold | int | 1 | 加成共现过滤阈值 |
+| chunk_size | int | 5120 | 并行处理分块大小 |
+| work_device | Union[str, torch.device, Literal['auto']] | 'auto' | 计算设备（自动推断策略：优先使用输入数据所在设备） |
+| output_device | Union[str, torch.device, Literal['auto']] | 'auto' | 输出设备（默认与计算设备一致） |
+
+#### 数据输入
+`PeakMZSearch`工具支持两种输入模式：
+
+1. **单层结构输入**:
+   - 输入格式: `qry_ions: torch.Tensor`, `ref_mzs: torch.Tensor`, `qry_RTs: Optional[torch.Tensor]`, `ref_RTs: Optional[torch.Tensor]`
+   - 形状: 
+     - `qry_ions`: (N_q,)
+     - `ref_mzs`: (N_r,)
+     - `qry_RTs`: (N_q,)
+     - `ref_RTs`: (N_r,)
+   - 数据类型: `torch.float32`
+   - 示例:
+     ```python
+     qry_ions = torch.tensor([1.0, 2.0, 3.0])
+     ref_mzs = torch.tensor([1.1, 2.1, 3.1])
+     qry_RTs = torch.tensor([0.1, 0.2, 0.3])
+     ref_RTs = torch.tensor([0.11, 0.21, 0.31])
+     ```
+
+2. **嵌套结构输入**:
+   - 输入格式: `qry_ions_queue: List[torch.Tensor]`, `ref_mzs_queue: List[torch.Tensor]`, `qry_RTs_queue: Optional[List[torch.Tensor]]`, `ref_RTs_queue: Optional[List[torch.Tensor]]`
+   - 形状: 
+     - `qry_ions_queue`: 每个元素为 (N_q,)
+     - `ref_mzs_queue`: 每个元素为 (N_r,)
+     - `qry_RTs_queue`: 每个元素为 (N_q,)
+     - `ref_RTs_queue`: 每个元素为 (N_r,)
+   - 数据类型: `torch.float32`
+   - 适用于处理多个样本或实验的批量峰搜索操作
+   - 示例:
+     ```python
+     qry_ions_queue = [
+         torch.tensor([1.0, 2.0, 3.0]),  # 查询组1
+         torch.tensor([4.0, 5.0, 6.0])   # 查询组2
+     ]
+     ref_mzs_queue = [
+         torch.tensor([1.1, 2.1, 3.1]),  # 参考组1
+         torch.tensor([4.1, 5.1, 6.1])   # 参考组2
+     ]
+     qry_RTs_queue = [
+         torch.tensor([0.1, 0.2, 0.3]),  # 查询组1的RT
+         torch.tensor([0.4, 0.5, 0.6])   # 查询组2的RT
+     ]
+     ref_RTs_queue = [
+         torch.tensor([0.11, 0.21, 0.31]),  # 参考组1的RT
+         torch.tensor([0.41, 0.51, 0.61])   # 参考组2的RT
+     ]
+     ```
+
+#### 数据输出
+`PeakMZSearch`工具的输出格式根据调用方法不同而有所区别：
+
+1. **run()方法输出** (单层结构处理):
+   - 输出类型: `Tuple[torch.Tensor, torch.Tensor]`
+   - 形状: 
+     - 匹配索引张量：(M, 2)，每行为 (qry_idx, ref_idx)
+     - 匹配误差张量：(M,)，对应每个匹配的 m/z 误差（ppm或Da）
+   - 数据类型: `torch.long` for indices, `torch.float32` for deltas
+   - 设备位置: 默认与计算设备相同，可通过`output_device`参数指定
+   - 示例:
+     ```python
+     indices, deltas = peak_mz_search_tool.run(qry_ions, ref_mzs)
+     # indices.shape  # torch.Size([M, 2])
+     # deltas.shape   # torch.Size([M,])
+     ```
+
+2. **run_by_queue()方法输出** (嵌套结构处理):
+   - 输出类型: `List[Tuple[torch.Tensor, torch.Tensor]]`
+   - 结构特点: 保持与输入相同的嵌套层级
+   - 每个元素的形状: 
+     - 匹配索引张量：(M, 2)，每行为 (qry_idx, ref_idx)
+     - 匹配误差张量：(M,)，对应每个匹配的 m/z 误差（ppm或Da）
+   - 示例:
+     ```python
+     # 输入结构: [ [查询组1,查询组2], [查询组3] ]
+     nested_result = peak_mz_search_tool.run_by_queue(qry_ions_queue, ref_mzs_queue, qry_RTs_queue, ref_RTs_queue)
+     # nested_result = [ (torch.Size([M1, 2]), torch.Size([M1,])), (torch.Size([M2, 2]), torch.Size([M2,])) ]
+     ```
+
+3. **非标准的使用情况**
+
+    无论是对于`run`还是`run_by_queue`,均支持多维度张量的输入。区别于标准使用方式输入两个一维张量，在输入多维张量作为Query和Ref时，输出张量的结构也会被拓展：
+    ```python
+    query: torch.Tensor = ... # (dim_0,dim_1,...,dim_q)
+    ref: torch.Tensor = ... # (dim_0,dim_1,...,dim_r)
+    indices, deltas = peak_mz_search_tool.run(query, ref)
+    indices.shape  # (dim_0,dim_1,...,dim_q,dim_q+1,dim_q+2,...,dim_q+dim_r+1)
+    deltas.shape   # (dim_0,dim_1,...,dim_q,dim_q+1,dim_q+2,...,dim_q+dim_r+1)
+    ```
+    如上述例子所示，在计算过程中，结果张量其实是输入张量的一个错位广播的结果，在合理设计的情况下，用户可以给每一个dim设置特定的“意义”，这样就会返回每一种“意义”下的索引结果。
+    
+    一个常见的情况是带加合物推理的碎片搜索：
+    ```python
+    query: torch.Tensor = ... # (n_query,)
+    ref: torch.Tensor = ... # (n_ref,n_adduct)
+    indices, deltas = peak_mz_search_tool.run(query, ref)
+    indices.shape  # (n_query,n_ref,n_adduct)
+    deltas.shape   # (n_query,n_ref,n_adduct)
+    ```
+    通过以上技巧，即可快速在搜索过程中确定命中来源何种加合物。
+
+#### 使用示例
+```python
+from masslib4search.snaps.MassSearchTools.utils.toolbox import PeakMZSearch
+
+# 初始化工具
+peak_mz_search_tool = PeakMZSearch(
+    mz_tolerance=3,
+    mz_tolerance_type='ppm',
+    RT_tolerance=0.1,
+    adduct_co_occurrence_threshold=1,
+    chunk_size=5120,
+    work_device='auto',
+    output_device='auto'
+)
+
+# 处理单层结构数据
+result_indices, result_deltas = peak_mz_search_tool.run(qry_ions, ref_mzs, qry_RTs, ref_RTs)
+
+# 处理嵌套结构数据
+nested_result = peak_mz_search_tool.run_by_queue(qry_ions_queue, ref_mzs_queue, qry_RTs_queue, ref_RTs_queue)
