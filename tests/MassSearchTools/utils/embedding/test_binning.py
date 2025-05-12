@@ -1,5 +1,5 @@
 import pytest
-from masslib4search.snaps.MassSearchTools.utils.toolbox import Binning
+from masslib4search.snaps.MassSearchTools.utils.toolbox import SpectrumBinning
 
 @pytest.mark.MassSearchTools_utils_embedding
 @pytest.mark.parametrize("device_config", [
@@ -19,7 +19,7 @@ def test_binning(query_spec_queue, device_config):
     }
     
     # 初始化工具箱
-    binning_toolbox = Binning(
+    binning_toolbox = SpectrumBinning(
         **{**base_params, **device_config}  # 合并参数
     )
     binning_toolbox.run_by_queue(query_spec_queue)

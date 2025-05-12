@@ -4,7 +4,7 @@ from .operators import SpectramSimilarityOperator,MSEntropyOperator,ms_entropy_s
 import dask
 import dask.bag as db
 from itertools import cycle
-from typing import List, Callable, Optional, Union, Literal
+from typing import List, Callable, Optional, Union, Literal, Dict
     
 @torch.no_grad()
 def spec_similarity_cpu(
@@ -83,7 +83,7 @@ def spec_similarity_cuda(
     torch.cuda.set_device(work_device)
     
     # 为每个worker创建三个专用流
-    worker_resources = [
+    worker_resources: List[Dict[torch.cuda.Stream,torch.cuda.Event]] = [
         {
             'h2d_stream': torch.cuda.Stream(),  # 数据传入流
             'compute_stream': torch.cuda.Stream(),  # 计算流
@@ -151,12 +151,25 @@ def spec_similarity_cuda_by_queue(
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> List[torch.Tensor]:
+
+    # 如果只有一个队列数据，跳过bag并行，直接调用spec_similarity_cuda
+    if len(query) == 1 and len(ref) == 1:
+        return [spec_similarity_cuda(
+            query[0], ref[0], sim_operator,
+            num_cuda_workers=num_cuda_workers,
+            work_device=work_device,
+            output_device=output_device
+        )]
     
     block_bag = db.from_sequence(zip(query, ref), npartitions=num_dask_workers)
     block_bag = block_bag.map(lambda x: spec_similarity_cuda(
-        x[0], x[1], sim_operator, num_cuda_workers, work_device, output_device
+        x[0], x[1], sim_operator,
+        num_cuda_workers=num_cuda_workers,
+        work_device=work_device,
+        output_device=output_device
     ))
     results = block_bag.compute(scheduler='threads', num_workers=num_dask_workers)
+    
     return results
 
 def spec_similarity(
@@ -170,6 +183,26 @@ def spec_similarity(
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
 ) -> List[torch.Tensor]:
+    
+    '''
+    执行谱图相似度计算（单层结构输入）
+
+    根据输入参数调用合适的相似度计算核心逻辑，输入为两个谱图向量张量列表。
+
+    Args:
+        query: 查询向量列表，每个元素形状为 (n_peaks, 2)，类型为 float32
+        ref: 参考向量列表，每个元素形状为 (n_peaks, 2)，类型为 float32
+        sim_operator: 用于计算相似度的算子，默认为 MSEntropyOperator
+        num_cuda_workers: CUDA并行度，默认为4
+        num_dask_workers: Dask并行度，默认为4
+        work_device: 计算设备，默认为自动推断
+        output_device: 输出设备，默认为自动推断
+        dask_mode: Dask的执行模式，默认为None，算子会决定模式
+        operator_kwargs: 相似度算子的额外参数，默认为None
+
+    Returns:
+        List[torch.Tensor]: 计算得到的相似度矩阵，形状为 (n_q, n_r)，类型为 float32
+    '''
 
     # 设备推断
     _work_device = resolve_device(work_device, query[0].device if query else torch.device('cpu'))
@@ -206,6 +239,27 @@ def spec_similarity_by_queue(
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
 ) -> List[List[torch.Tensor]]:
+    
+    '''
+    执行谱图相似度计算（嵌套结构输入）
+
+    支持多层级输入结构（如批次数据），自动进行扁平化处理后保持原始数据层级，
+    适用于处理多个样本或实验的批量相似度计算操作
+
+    Args:
+        query: 查询向量队列，每个元素为查询向量列表，每个查询向量形状为 (n_peaks, 2)，类型为 float32
+        ref: 参考向量队列，每个元素为参考向量列表，每个参考向量形状为 (n_peaks, 2)，类型为 float32
+        sim_operator: 用于计算相似度的算子，默认为 MSEntropyOperator
+        num_cuda_workers: CUDA并行度，默认为4
+        num_dask_workers: Dask并行度，默认为4
+        work_device: 计算设备，默认为自动推断
+        output_device: 输出设备，默认为自动推断
+        dask_mode: Dask的执行模式，默认为None，算子会决定模式
+        operator_kwargs: 相似度算子的额外参数，默认为None
+
+    Returns:
+        List[List[torch.Tensor]]: 与输入结构对应的相似度矩阵列表，每个元素形状为 (n_q, n_r)，类型为 float32
+    '''
     
     # 设备推断
     _work_device = resolve_device(work_device, query[0][0].device if query else torch.device('cpu'))

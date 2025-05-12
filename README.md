@@ -13,10 +13,16 @@
 
 以下是可用的工具函数组：
 
-- [`Binning`](#binning-anchor)：质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
-- [`EmbeddingSimilarity`](#embedding-similarity-anchor)：嵌入向量相似度计算工具。
+- [`SpectrumBinning`](#binning-anchor)：质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
+- [`EmbeddingSimilarity`](#embedding-similarity-anchor)：嵌入向量相似度计算工具，输出二维相似度矩阵。
+- [`SpectrumSimilarity`](#spectrum-similarity-anchor)：谱图相似度计算工具，输出二维相似度矩阵。
 
-### <a id="binning-anchor"></a> Binning
+对于这些工具函数组的命名上也有一些约定：
+- Embedding~：表示这个工具函数组的输入为规整的向量格式，最小处理单元为embedding-chunk。
+- Spectrum~：表示这个工具函数组的输入为质谱图张量格式，这种输入往往是nested结构，即每个谱图的长度不一致，最小处理单元为单个谱图。
+- ~Similarity：相似度计算工具组，用于计算全量相似度矩阵，这种工具会对输入的Query和Ref进行pairwise计算，并计算出二维相似度矩阵。
+
+### <a id="binning-anchor"></a> SpectrumBinning
 质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
 
 #### 核心功能
@@ -36,7 +42,7 @@
 | output_device | Union[str, torch.device, Literal['auto']] | 'auto' | 结果存储设备(默认与计算设备一致) |
 
 #### 数据输入
-`Binning`工具支持多种输入模式：
+`SpectrumBinning`工具支持多种输入模式：
 
 1. **Spec模式** (推荐):
    - 输入格式: `List[torch.Tensor]`，每个张量形状为`(n_peaks, 2)`
@@ -76,7 +82,7 @@
 ```
 
 #### 数据输出
-`Binning`工具的输出格式根据调用方法不同而有所区别：
+`SpectrumBinning`工具的输出格式根据调用方法不同而有所区别：
 
 1. **run()方法输出** (单层结构处理):
    - 输出类型: `torch.Tensor`
@@ -124,10 +130,10 @@
 
 #### 使用示例
 ```python
-from masslib4search.snaps.MassSearchTools.utils.toolbox import Binning
+from masslib4search.snaps.MassSearchTools.utils.toolbox import SpectrumBinning
 
 # 初始化工具
-binning_tool = Binning(
+binning_tool = SpectrumBinning(
     binning_window=(50.0, 1000.0, 1.0),
     pool_method="sum",
     batch_size=128,
@@ -256,3 +262,127 @@ result = embedding_similarity_tool.run(query, ref)
 
 # 处理嵌套结构数据
 nested_result = embedding_similarity_tool.run_by_queue(query_queue, ref_queue)
+```
+
+### <a id="spectrum-similarity-anchor"></a> SpectrumSimilarity
+谱图相似度计算工具盒，输入质谱谱图数据并指定相似度算子，计算查询谱图与参考谱图之间的相似度矩阵。
+
+#### 核心功能
+- 封装谱图相似度计算全流程
+- 提供可配置化的计算参数管理
+- 支持设备自动分配策略（CPU/CUDA）
+- 基于Dask的批处理并行计算
+- 嵌套数据结构层级保持
+
+#### 配置参数
+| 参数 | 类型 | 默认值 | 约束 | 描述 |
+|------|------|--------|------|------|
+| sim_operator | Type[SpectramSimilarityOperator] | MSEntropyOperator | - | 谱图相似度计算核心算子 |
+| num_cuda_workers | int | 4 | ≥0 | CUDA并行度（每个Worker含3个CUDA流） |
+| num_dask_workers | int | 4 | ≥0 | Dask并行线程数 |
+| work_device | Union[str, torch.device, 'auto'] | 'auto' | - | 自动设备选择策略（优先输入设备） |
+| output_device | Union[str, torch.device, 'auto'] | 'auto' | - | 结果存储设备选择策略 |
+| operator_kwargs | Optional[dict] | None | - | 算子的额外参数配置 |
+| dask_mode | Literal["threads", "processes", "single-threaded"] | "threads" | - | Dask任务调度模式 |
+
+**预定义算子**
+在masslib4search/snaps/MassSearchTools/utils/similarity/operators.py中预定义：
+  - MSEntropyOperator (默认使用)：质谱熵相似度算法
+
+所有谱图相似度算子均继承自`SpectramSimilarityOperator`，支持通过继承实现自定义算法，详细接口参见masslib4search/snaps/MassSearchTools/utils/similarity/operators/ABC_operator.py
+
+#### 数据输入
+`SpectrumSimilarity`工具支持两种谱图数据结构输入模式：
+
+1. **单层结构输入**:
+   - 输入格式: `query: List[torch.Tensor]`, `ref: List[torch.Tensor]`
+   - 形状: 
+     - `query`: List[(n_peaks, 2)]
+     - `ref`: List[(n_peaks, 2)]
+   - 数据类型: `torch.float32`
+   - 示例:
+     ```python
+      query = [
+          torch.tensor([[100.0, 0.5], [200.0, 0.8]]),  # 查询谱图1
+          torch.tensor([[150.0, 0.3], [300.0, 0.6]])   # 查询谱图2
+      ]
+      ref = [
+          torch.tensor([[100.0, 0.5], [200.0, 0.8]]),  # 参考谱图1
+          torch.tensor([[150.0, 0.3], [300.0, 0.6]])   # 参考谱图2
+      ]
+     ```
+
+2. **嵌套结构输入**:
+   - 输入格式: `query_queue: List[List[torch.Tensor]]`, `ref_queue: List[List[torch.Tensor]]`
+   - 形状: 
+     - 每个`query_queue`元素: List[(n_peaks, 2)]
+     - 每个`ref_queue`元素: List[(n_peaks, 2)]
+   - 数据类型: `torch.float32`
+   - 适用于处理多个样本或实验的批量相似度计算操作
+   - 示例:
+     ```python
+      query_queue = [
+          [torch.tensor([[100.0, 0.5], [200.0, 0.8]]), torch.tensor([[150.0, 0.3], [300.0, 0.6]])],  # 查询组1
+          [torch.tensor([[250.0, 0.4], [400.0, 0.7]])]  # 查询组2
+      ]
+      ref_queue = [
+          [torch.tensor([[100.0, 0.5], [200.0, 0.8]]), torch.tensor([[150.0, 0.3], [300.0, 0.6]])],  # 参考组1
+          [torch.tensor([[250.0, 0.4], [400.0, 0.7]])]  # 参考组2
+      ]
+     ```
+
+#### 数据输出
+`SpectrumSimilarity`工具的输出格式根据调用方法不同而有所区别：
+
+1. **run()方法输出** (单层结构处理):
+   - 输出类型: `torch.Tensor`
+   - 形状: `(n_q, n_r)`
+   - 数据类型: `torch.float32`
+   - 设备位置: 默认与计算设备相同，可通过`output_device`参数指定
+   - 示例:
+     ```python
+      # 输入2个查询谱图和2个参考谱图 → 相似度矩阵 (2x2)
+      output = embedding_similarity_tool.run(query, ref)
+      print(output)
+      # 输出: 
+      # tensor([[0.9876, 0.1234],
+      #         [0.5678, 0.8765]])
+     ```
+     
+2. **run_by_queue()方法输出** (嵌套结构处理):
+   - 输出类型: `List[torch.Tensor]`
+   - 结构特点: 保持与输入相同的嵌套层级
+   - 每个元素的形状: `(n_q, n_r)`
+   - 示例:
+     ```python
+      # 输入结构: [ [查询组1,查询组2], [查询组3] ]
+      output = embedding_similarity_tool.run_by_queue(query_queue, ref_queue)
+      print(output)
+      # 输出:  [
+      #     tensor([[0.9876, 0.1234],
+      #             [0.5678, 0.8765]]),
+      #     tensor([[0.2345, 0.6789]])
+      # ]
+     ```
+
+#### 使用示例
+```python
+from masslib4search.snaps.MassSearchTools.utils.toolbox import SpectrumSimilarity
+from masslib4search.snaps.MassSearchTools.utils.similarity.operators import MSEntropyOperator
+
+# 初始化工具
+spectrum_similarity_tool = SpectrumSimilarity(
+    sim_operator=MSEntropyOperator,
+    num_cuda_workers=4,
+    num_dask_workers=4,
+    work_device='auto',
+    operator_kwargs=None,
+    dask_mode='threads'
+)
+
+# 处理单层结构数据
+result = spectrum_similarity_tool.run(query, ref)
+
+# 处理嵌套结构数据
+nested_result = spectrum_similarity_tool.run_by_queue(query_queue, ref_queue)
+```

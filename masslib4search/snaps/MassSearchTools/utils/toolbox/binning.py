@@ -7,7 +7,7 @@ from ..embedding.spec_binning import (
 import torch
 from typing import Tuple,Union,Optional,List,Literal
 
-class Binning(ToolBox):
+class SpectrumBinning(ToolBox):
     
     '''
     质谱分箱处理工具盒
