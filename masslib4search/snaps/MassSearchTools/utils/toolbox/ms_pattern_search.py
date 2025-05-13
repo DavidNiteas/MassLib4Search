@@ -34,13 +34,34 @@ class PeakPatternSearch(ToolBox):
     func_by_queue = mz_pattern_search_by_queue
 
     # 实例变量
-    loss_tolerance: float = Field(default=None, metadata={'description': '中心丢失边匹配的容差阈值（单位：Da）'})
-    mz_tolerance: float = Field(default=3, metadata={'description': '质荷比偏差容忍度'})
-    mz_tolerance_type: Literal['ppm', 'Da'] = Field(default='ppm', metadata={'description': '质荷比偏差容忍度类型'})
-    chunk_size: int = Field(default=5120, metadata={'description': '并行处理分块大小'})
-    num_workers: Optional[int] = Field(default=4, metadata={'description': '工作进程数'})
-    work_device: Union[str, torch.device, Literal['auto']] = Field(default='auto', metadata={'description': '工作设备'})
-    output_device: Union[str, torch.device, Literal['auto']] = Field(default='cpu', metadata={'description': '输出设备，强制保留在CPU'})
+    loss_tolerance: float = Field(
+        default=None,
+        description="中心丢失边匹配的容差阈值（单位：Da）"
+    )
+    mz_tolerance: float = Field(
+        default=3,
+        description="质荷比偏差容忍度"
+    )
+    mz_tolerance_type: Literal['ppm', 'Da'] = Field(
+        default='ppm',
+        description="质荷比偏差容忍度类型"
+    )
+    chunk_size: int = Field(
+        default=5120,
+        description="并行处理分块大小"
+    )
+    num_workers: Optional[int] = Field(
+        default=4,
+        description="工作进程数"
+    )
+    work_device: Union[str, torch.device, Literal['auto']] = Field(
+        default='auto',
+        description="工作设备"
+    )
+    output_device: Union[str, torch.device, Literal['auto']] = Field(
+        default='cpu',
+        description="输出设备，强制保留在CPU"
+    )
 
     def run(
         self,

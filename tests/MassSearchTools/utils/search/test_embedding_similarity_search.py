@@ -48,7 +48,7 @@ def test_embedding_similarity_search(query_spec_queue, ref_spec_queue, device_co
     search_results = similarity_search_toolbox.run_by_queue(binned_query_spec, binned_ref_spec)
     
     # 验证结果
-    assert len(search_results) == 2  # 假设输入的查询队列有两个元素
+    assert len(search_results) == 2
     assert torch.allclose(search_results[0][0], search_results[1][0])
     assert torch.allclose(search_results[0][1], search_results[1][1])
     assert search_results[0][0].shape == (2, similarity_search_base_params['top_k'])

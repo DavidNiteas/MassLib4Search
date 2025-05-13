@@ -19,6 +19,7 @@
 - [`PeakMZSearch`](#peak-mz-search-anchor)：基于m/z值的质谱峰搜索工具箱，封装m/z峰搜索流程，提供配置化的计算参数管理。
 - [`PeakPatternSearch`](#peak-pattern-search-anchor)：基于质谱图结构的模式匹配搜索工具箱，封装质谱图结构的模式匹配搜索流程，提供配置化的计算参数管理。
 - [`EmbeddingSimilaritySearch`](#embedding-similarity-search-anchor)：嵌入向量相似度搜索工具，输出最相关的参考向量的索引和相似度分数。
+- [`SpectrumSimilaritySearch`](#spectrum-similarity-search-anchor)：谱图相似度搜索工具，输出最相关的参考谱图的索引和相似度分数。
 
 对于这些工具函数组的命名上也有一些约定：
 - Embedding~：表示这个工具函数组的输入为规整的向量格式，最小处理单元为embedding-chunk。
@@ -787,3 +788,120 @@ indices, scores = embedding_similarity_search_tool.run(query, ref)
 nested_results = embedding_similarity_search_tool.run_by_queue(query_queue, ref_queue)
 ```
 
+### <a id="spectrum-similarity-search-anchor"></a> SpectrumSimilaritySearch
+谱图相似度搜索工具盒，输入谱图向量并指定相似度算子，计算查询谱图与参考谱图之间的相似度矩阵。
+
+#### 核心功能
+- 封装谱图相似度搜索流程
+- 提供配置化的计算参数管理
+- 支持设备自动分配策略
+- 批处理并行计算
+- 嵌套数据结构处理
+
+#### 配置参数
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| sim_operator | Type[SpectramSimilarityOperator] | MSEntropyOperator | 用于计算谱图向量之间相似度的算子 |
+| top_k | Optional[int] | None | 每个查询谱图返回前top_k个最相关的参考谱图的索引和相似度分数 |
+| num_cuda_workers | int | 4 | CUDA并行度（默认4个Worker） |
+| num_dask_workers | int | 4 | Dask并行度（默认4线程） |
+| work_device | Union[str, torch.device, Literal['auto']] | 'auto' | 计算设备（自动推断策略：优先使用输入数据所在设备） |
+| output_device | Union[str, torch.device, Literal['auto']] | 'auto' | 结果存储设备（默认与计算设备一致） |
+| operator_kwargs | Optional[dict] | None | 相似度计算算子的额外参数 |
+| dask_mode | Optional[Literal["threads", "processes", "single-threaded"]] | "threads" | Dask的执行模式 |
+
+**相似度算子**
+
+在 `masslib4search/snaps/MassSearchTools/utils/similarity/operators.py` 中，我们预定义了以下算子：
+- MSEntropyOperator (默认使用)
+
+所有计算谱图向量相似度的算子均是 `SpectramSimilarityOperator` 的子类，用户可以自定义算子实现自定义相似度计算。
+`SpectramSimilarityOperator` 类的详细接口见 `masslib4search/snaps/MassSearchTools/utils/similarity/operators/ABC_operator.py`
+
+#### 数据输入
+`SpectrumSimilaritySearch` 工具支持两种输入模式：
+
+1. **单层结构输入**:
+   - 输入格式: `query: List[torch.Tensor]`, `ref: List[torch.Tensor]`
+   - 形状: 
+     - `query`: List[(n_peaks, 2)]
+     - `ref`: List[(n_peaks, 2)]
+   - 数据类型: `torch.float32`
+   - 示例:
+     ```python
+     query = [torch.tensor([[1.0, 2.0], [3.0, 4.0]])]
+     ref = [torch.tensor([[5.0, 6.0], [7.0, 8.0]])]
+     ```
+
+2. **嵌套结构输入**:
+   - 输入格式: `query_queue: List[List[torch.Tensor]]`, `ref_queue: List[List[torch.Tensor]]`
+   - 形状: 
+     - 每个`query_queue`元素: List[(n_peaks, 2)]
+     - 每个`ref_queue`元素: List[(n_peaks, 2)]
+   - 数据类型: `torch.float32`
+   - 适用于处理多个样本或实验的批量相似度搜索操作
+   - 示例:
+     ```python
+     query_queue = [
+         [torch.tensor([[1.0, 2.0], [3.0, 4.0]]), torch.tensor([[5.0, 6.0], [7.0, 8.0]])],  # 查询组1
+         [torch.tensor([[9.0, 10.0], [11.0, 12.0]])]  # 查询组2
+     ]
+     ref_queue = [
+         [torch.tensor([[13.0, 14.0], [15.0, 16.0]]), torch.tensor([[17.0, 18.0], [19.0, 20.0]])],  # 参考组1
+         [torch.tensor([[21.0, 22.0], [23.0, 24.0]])]  # 参考组2
+     ]
+     ```
+
+#### 数据输出
+`SpectrumSimilaritySearch` 工具的输出格式根据调用方法不同而有所区别：
+
+1. **run()方法输出** (单层结构处理):
+   - 输出类型: `Tuple[torch.Tensor, torch.Tensor]`
+   - 形状: `(n_q, top_k)` 对于索引矩阵，`(n_q, top_k)` 对于相似度分数矩阵
+   - 数据类型: `torch.float32` 对于相似度分数矩阵，`torch.long` 对于索引矩阵
+   - 设备位置: 默认与计算设备相同，可通过`output_device`参数指定
+   - 示例:
+     ```python
+     # 输入2个查询谱图和2个参考谱图 → 相似度矩阵和索引矩阵 (2xtop_k)
+     indices, scores = spectrum_similarity_search_tool.run(query, ref)
+     indices.shape  # torch.Size([2, top_k])
+     scores.shape  # torch.Size([2, top_k])
+     ```
+
+2. **run_by_queue()方法输出** (嵌套结构处理):
+   - 输出类型: `List[Tuple[torch.Tensor, torch.Tensor]]`
+   - 结构特点: 保持与输入相同的嵌套层级
+   - 每个元素的形状: `(n_q, top_k)` 对于索引矩阵，`(n_q, top_k)` 对于相似度分数矩阵
+   - 示例:
+     ```python
+     # 输入结构: [ [查询组1,查询组2], [查询组3] ]
+     results = spectrum_similarity_search_tool.run_by_queue(query_queue, ref_queue)
+     results[0][0].shape  # 第一组结果的索引矩阵形状
+     results[0][1].shape  # 第一组结果的相似度矩阵形状
+     results[1][0].shape  # 第二组结果的索引矩阵形状
+     results[1][1].shape  # 第二组结果的相似度矩阵形状
+     ```
+
+#### 使用示例
+```python
+from masslib4search.snaps.MassSearchTools.utils.toolbox import SpectrumSimilaritySearch
+from masslib4search.snaps.MassSearchTools.utils.similarity.operators import MSEntropyOperator
+
+# 初始化工具
+spectrum_similarity_search_tool = SpectrumSimilaritySearch(
+    sim_operator=MSEntropyOperator,
+    top_k=5,
+    num_cuda_workers=4,
+    num_dask_workers=4,
+    work_device='auto',
+    output_device='auto',
+    operator_kwargs=None,
+    dask_mode='threads'
+)
+
+# 处理单层结构数据
+indices, scores = spectrum_similarity_search_tool.run(query, ref)
+
+# 处理嵌套结构数据
+nested_results = spectrum_similarity_search_tool.run_by_queue(query_queue, ref_queue)
+```

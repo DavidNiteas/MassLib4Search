@@ -7,7 +7,6 @@ from ..similarity.ms_similarity import (
 )
 import dask
 import dask.bag as db
-import pandas as pd
 from typing import Tuple,Callable,Optional,Union,Literal,List
 
 @torch.no_grad()
@@ -64,19 +63,16 @@ def spec_similarity_search_cpu(
         scores_buf[:current_count] = valid_part[sorted_idx]
         indices_buf[:current_count] = indices_buf[:current_count][sorted_idx]
 
-        return scores_buf.to(output_device), indices_buf.to(output_device)
+        return indices_buf.to(output_device),scores_buf.to(output_device)
 
     # Dask并行处理
     query_bag = db.from_sequence(query, npartitions=num_dask_workers)
     query_bag = query_bag.map(_search_single_query)
-    results = query_bag.compute(scheduler=dask_mode,num_workers=num_dask_workers)
+    indices_bag = query_bag.pluck(0)
+    scores_bag = query_bag.pluck(1)
+    indices,scores = dask.compute(indices_bag, scores_bag, scheduler=dask_mode, num_workers=num_dask_workers)
     
-    # 堆叠结果
-    results = pd.DataFrame(results,columns=["scores", "indices"])
-    scores = torch.stack(results['scores'].tolist())
-    indices = torch.stack(results['indices'].tolist())
-    
-    return scores, indices
+    return torch.stack(indices),torch.stack(scores)
 
 @torch.no_grad()
 def spec_similarity_search_cpu_by_queue(
@@ -132,23 +128,24 @@ def spec_similarity_search_cpu_by_queue(
         scores_buf[:current_count] = valid_part[sorted_idx]
         indices_buf[:current_count] = indices_buf[:current_count][sorted_idx]
 
-        return scores_buf.to(output_device), indices_buf.to(output_device)
+        return indices_buf.to(output_device), scores_buf.to(output_device)
     
     # 构建配对序列
     bag_queue = []
     for i,query_block in enumerate(query):
         query_block_bag = db.from_sequence(zip([i]*len(query_block), query_block), npartitions=num_dask_workers)
         results_bag = query_block_bag.map(lambda x: _search_single_query(x[0], x[1]))
-        bag_queue.append(results_bag)
+        indices_bag = results_bag.pluck(0)
+        scores_bag = results_bag.pluck(1)
+        bag_queue.append((indices_bag, scores_bag))
     
     # 并行搜索
     queue_results = dask.compute(bag_queue, scheduler=dask_mode, num_workers=num_dask_workers)[0]
     
     # 合并结果
     queue_results_bag = db.from_sequence(queue_results, npartitions=num_dask_workers)
-    queue_results_bag = queue_results_bag.map(lambda x: pd.DataFrame(x,columns=["scores", "indices"]))
-    queue_results_bag = queue_results_bag.map(lambda x: (torch.stack(x['scores'].tolist()),torch.stack(x['indices'].tolist())))
-    queue_results = queue_results_bag.compute(scheduler=dask_mode, num_workers=num_dask_workers)
+    queue_results_bag = queue_results_bag.map(lambda x: (torch.stack(x[0]), torch.stack(x[1])))
+    queue_results = queue_results_bag.compute(scheduler="threads", num_workers=num_dask_workers)
     
     return queue_results
 
@@ -225,8 +222,8 @@ def spec_similarity_search_cuda(
 
             # 异步传回结果
             results[query_idx] = (
+                index_buf.to(output_device, non_blocking=True),
                 score_buf.to(output_device, non_blocking=True),
-                index_buf.to(output_device, non_blocking=True)
             )
 
     # 同步所有流
@@ -266,6 +263,37 @@ def spec_similarity_search(
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    """
+    在参考谱图库中执行批量相似度搜索，支持CUDA加速和分布式计算。
+
+    功能说明：
+    1. 对每个查询谱图，计算其与所有参考谱图的相似度分数
+    2. 自动选择CUDA/CPU计算设备（当work_device='auto'时）
+    3. 返回每个查询谱图的top_k最相似结果，包含索引和分数
+
+    参数说明：
+    - query      (list[torch.Tensor]) : 查询谱图列表，单谱图形状(n_peaks,2)
+    - ref        (list[torch.Tensor]) : 参考谱图列表，单谱图形状(n_peaks,2)
+    - sim_operator (callable)         : 相似度计算算子，默认=MSEntropyOperator
+    - top_k      (int)               : 返回结果数量，默认=参考库长度
+    - num_cuda_workers (int)         : CUDA工作线程数，默认=4
+    - num_dask_workers (int)         : Dask工作线程数，默认=4
+    - work_device (str|torch.device) : 计算设备，可选['cuda','cpu','auto']，默认='auto'
+    - output_device (str|torch.device): 输出设备，默认='auto'
+    - dask_mode  (str)               : Dask调度模式，默认=None
+    - operator_kwargs (dict)         : 算子额外参数，默认=None
+
+    返回：
+    - tuple(
+        - indices  (torch.Tensor) : 相似谱图索引，形状(len(query), top_k)
+        - scores   (torch.Tensor) : 相似度分数，形状(len(query), top_k) \n
+        )
+
+    设备选择：
+    - 当work_device='auto'时：优先使用CUDA（若可用），否则使用CPU
+    - 输出会自动转换到output_device指定设备
+    """
 
     # 设备推断
     _work_device = resolve_device(work_device, query[0].device if query else torch.device('cpu'))
@@ -305,6 +333,40 @@ def spec_similarity_search_by_queue(
     dask_mode: Optional[Literal["threads", "processes", "single-threaded"]] = None,
     operator_kwargs: Optional[dict] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    
+    """
+    在参考谱图库中执行批量相似度搜索，支持设备自动选择与并行加速
+
+    功能特性：
+    1. 支持CUDA加速计算与Dask分布式计算
+    2. 自动设备选择策略（CUDA优先）
+    3. 多级并行优化：GPU线程级并行 + Dask任务级并行
+
+    参数说明：
+    - query      (list[torch.Tensor]) : 查询谱图列表，单谱图为形状(n_peaks,2)的张量
+    - 每行表示一个质谱峰，列0为m/z值，列1为强度值
+    - ref        (list[torch.Tensor]) : 参考谱图库，格式同query
+    - sim_operator (callable)         : 相似度计算算子，默认=MSEntropyOperator()
+    - 应实现__call__(q: Tensor, r: Tensor) -> float 接口
+    - top_k      (int)               : 返回的最大结果数，默认=len(ref)
+    - num_cuda_workers (int)         : GPU计算流数量，默认=4
+    - num_dask_workers (int)         : Dask并行工作节点数，默认=4
+    - work_device (str|Device)       : 计算设备['cuda','cpu','auto']，默认='auto'
+    - output_device (str|Device)     : 输出设备，默认保持计算结果设备
+    - dask_mode  (str)               : Dask调度模式，可选['threads','processes',None]
+    - operator_kwargs (dict)         : 算子参数扩展，如{'threshold':0.8}
+
+    返回：
+    List[(indices, scores)]:
+    - indices  (Tensor) : 相似谱图索引，形状为[查询数, top_k]，按相似度降序排列
+    - scores   (Tensor) : 对应相似度分数，形状同indices
+
+    设备策略：
+    1. 当work_device='auto'时：
+    - 优先使用CUDA（当检测到GPU可用且数据在GPU上）
+    - 否则使用CPU并行计算
+    2. 输出张量自动转换到output_device指定设备
+    """
     
     # 设备推断
     _work_device = resolve_device(work_device, query[0][0].device if query else torch.device('cpu'))

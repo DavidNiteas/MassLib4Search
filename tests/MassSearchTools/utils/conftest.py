@@ -62,3 +62,18 @@ def query_spec_queue(query_spec) -> List[List[torch.Tensor]]:
 @pytest.fixture(scope='session')
 def ref_spec_queue(ref_spec) -> List[List[torch.Tensor]]:
     return [ref_spec] * 2
+
+#聚合MassSearchTools_utils标签
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    for item in items:
+        # 定义子标记集合
+        sub_markers = {
+            "MassSearchTools_utils_embedding",
+            "MassSearchTools_utils_search",
+            "MassSearchTools_utils_similarity"
+        }
+        
+        # 如果测试项包含任意子标记，自动添加父标记
+        if any(mark in item.keywords for mark in sub_markers):
+            item.add_marker(pytest.mark.MassSearchTools_utils)

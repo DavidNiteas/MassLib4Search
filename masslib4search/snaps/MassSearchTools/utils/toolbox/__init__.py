@@ -5,6 +5,7 @@ from .ms_similarity import SpectrumSimilarity
 from .ms_peak_search import PeakMZSearch
 from .ms_pattern_search import PeakPatternSearch,SpectrumPatternWrapper
 from .embedding_similarity_search import EmbeddingSimilaritySearch
+from .ms_similarity_search import SpectrumSimilaritySearch
 
 __all__ = [
     'ToolBox',
@@ -14,5 +15,6 @@ __all__ = [
     'PeakMZSearch',
     'PeakPatternSearch',
     'SpectrumPatternWrapper',
-    'EmbeddingSimilaritySearch'
+    'EmbeddingSimilaritySearch',
+    'SpectrumSimilaritySearch'
 ]

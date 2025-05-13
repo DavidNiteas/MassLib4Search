@@ -34,13 +34,36 @@ class PeakMZSearch(ToolBox):
     func_cuda = mz_search_cuda
 
     # 实例变量
-    mz_tolerance: float = Field(default=3, metadata={'description': '质荷比偏差容忍度'})
-    mz_tolerance_type: Literal['ppm', 'Da'] = Field(default='ppm', metadata={'description': '质荷比偏差容忍度类型'})
-    RT_tolerance: float = Field(default=0.1, metadata={'description': '保留时间容忍度'})
-    adduct_co_occurrence_threshold: int = Field(default=1, metadata={'description': '加成共现阈值'})
-    chunk_size: int = Field(default=5120, metadata={'description': '并行处理分块大小'})
-    work_device: Union[str, torch.device, Literal['auto']] = Field(default='auto', metadata={'description': '工作设备'})
-    output_device: Union[str, torch.device, Literal['auto']] = Field(default='auto', metadata={'description': '输出设备'})
+    mz_tolerance: float = Field(
+        default=3,
+        description="质荷比偏差容忍度（单位：ppm或Da）"
+    )
+    mz_tolerance_type: Literal['ppm', 'Da'] = Field(
+        default='ppm',
+        description="质荷比容差类型：ppm（百万分之一）或 Da（道尔顿）"
+    )
+    RT_tolerance: float = Field(
+        default=0.1,
+        description="保留时间容差（单位：分钟）"
+    )
+    adduct_co_occurrence_threshold: int = Field(
+        default=1,
+        description="加合物共现最小次数阈值（>=此值才视为有效加合物）",
+        ge=1
+    )
+    chunk_size: int = Field(
+        default=5120,
+        description="数据分块大小（平衡内存使用与计算效率）",
+        ge=128
+    )
+    work_device: Union[str, torch.device, Literal['auto']] = Field(
+        default='auto',
+        description="计算设备，自动模式（auto）优先使用CUDA可用GPU"
+    )
+    output_device: Union[str, torch.device, Literal['auto']] = Field(
+        default='auto',
+        description="输出设备，auto模式保持与work_device一致"
+    )
 
     def run(
         self,
