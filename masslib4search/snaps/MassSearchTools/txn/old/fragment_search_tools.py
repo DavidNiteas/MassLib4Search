@@ -24,7 +24,7 @@ def search_block_fragments(
     adduct_co_occurrence_threshold: int = 1,
     chunk_size: int = 5120,
 ) -> pd.DataFrame: # columns: qry_ids, ref_ids, adduct; index: qry_index
-    I = mz_search(
+    I,D = mz_search(
         qry_ions_array,ref_fragment_mzs_array,
         mz_tolerance,mz_tolerance_type,
         query_RTs,ref_RTs,RT_tolerance,

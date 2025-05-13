@@ -58,7 +58,7 @@ class PeakMZSearch(ToolBox):
     )
     work_device: Union[str, torch.device, Literal['auto']] = Field(
         default='auto',
-        description="计算设备，自动模式（auto）优先使用CUDA可用GPU"
+        description="计算设备，自动模式（auto）使用输入数据所在的设备"
     )
     output_device: Union[str, torch.device, Literal['auto']] = Field(
         default='auto',

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from pydantic import BaseModel,ConfigDict
+from pydantic import BaseModel, ConfigDict
 from typing import TypeVar, Type, Dict, Tuple, Any, Optional, List, Sequence
 
 data_entity_type = TypeVar('data_entity_type', bound='SearchDataEntity')
@@ -8,44 +8,40 @@ results_entity_type = TypeVar('results_entity_type', bound='SearchResultsEntity'
 
 class SearchDataEntity(BaseModel, ABC):
     
-    # pydantic config
-    model_config = ConfigDict(extra='forbid',slots=True)
-    
-    # instance variables
-    query_ids: Optional[List[Optional[Sequence]]] = None
-    ref_ids: Optional[List[Optional[Sequence]] ]= None
+    # pydantic 配置
+    model_config = ConfigDict(extra='forbid', slots=True, arbitrary_types_allowed=True)
     
     @abstractmethod
     def get_inputs(self) -> Tuple[
-        Tuple[Any,...], # args
-        Dict[str,Any], # kwargs
+        Tuple[Any, ...],  # args
+        Dict[str, Any],  # kwargs
     ]:
-        '''Get the search function input from the search data entity.'''
+        '''从搜索数据实体中获取搜索函数输入。'''
         pass
     
     @classmethod
     @abstractmethod
     def from_raw_data(cls: Type[data_entity_type], *args, **kwargs) -> data_entity_type:
-        '''Convert the raw search data to the search data entity.'''
+        '''将原始搜索数据转换为搜索数据实体。'''
         pass
     
 class SearchConfigEntity(BaseModel, ABC):
     
-    # pydantic config
-    model_config = dict(extra='forbid')
+    # pydantic 配置
+    model_config = dict(extra='forbid', slots=True, arbitrary_types_allowed=True)
     
     @abstractmethod
     def get_inputs(self) -> Tuple[
-        Tuple[Any,...], # args
-        Dict[str,Any], # kwargs
+        Tuple[Any, ...],  # args
+        Dict[str, Any],  # kwargs
     ]:
-        '''Get the search function kwargs from the search config.'''
+        '''从搜索配置中获取搜索函数 kwargs。'''
         pass
     
 class SearchResultsEntity(BaseModel, ABC):
     
-    # pydantic config
-    model_config = dict(extra='forbid')
+    # pydantic 配置
+    model_config = dict(extra='forbid', slots=True, arbitrary_types_allowed=True)
     
     @classmethod
     @abstractmethod
@@ -54,38 +50,38 @@ class SearchResultsEntity(BaseModel, ABC):
         raw_results, 
         data: SearchDataEntity,
     ) -> results_entity_type:
-        '''Convert the raw search results to the search results entity.'''
+        '''将原始搜索结果转换为搜索结果实体。'''
         pass
 
-class Searcher(BaseModel,ABC):
+class Searcher(BaseModel, ABC):
     
-    # pydantic config
-    model_config = ConfigDict(extra='forbid',slots=True)
+    # pydantic 配置
+    model_config = ConfigDict(extra='forbid', slots=True, arbitrary_types_allowed=True)
     
-    # class variables
+    # 类变量
     input_type = SearchDataEntity
     results_type = SearchResultsEntity
     
-    # instance variables
+    # 实例变量
     config: SearchConfigEntity
     
-    def check_data(self,data: SearchDataEntity):
-        '''Check if the data is valid for the search.'''
+    def check_data(self, data: SearchDataEntity):
+        '''检查数据是否适用于搜索。'''
         if not isinstance(data, self.input_type):
-            raise TypeError(f"Data must be of type {self.input_type.__name__}")
+            raise TypeError(f"数据必须是类型 {self.input_type.__name__}")
         
     def merge_inputs(
         self,
-        data_args: Tuple[Any,...],
-        data_kwargs: Dict[str,Any],
-        config_args: Tuple[Any,...],
-        config_kwargs: Dict[str,Any],
+        data_args: Tuple[Any, ...],
+        data_kwargs: Dict[str, Any],
+        config_args: Tuple[Any, ...],
+        config_kwargs: Dict[str, Any],
     ) -> Tuple[
-        Tuple[Any,...], # args
-        Dict[str,Any], # kwargs
+        Tuple[Any, ...],  # args
+        Dict[str, Any],  # kwargs
     ]:
         args = []
-        for data,config in zip(data_args,config_args):
+        for data, config in zip(data_args, config_args):
             args.append(config if config is not None else data)
         kwargs = {**data_kwargs, **config_kwargs}
         return tuple(args), kwargs
@@ -93,18 +89,18 @@ class Searcher(BaseModel,ABC):
     @abstractmethod
     def search_method(self, *args, **kwargs):
         '''
-        The search function to be implemented by the searcher.
-        The function should take the search data and config as input.
-        The function should return the raw search results, which will be converted to the search results entity by the SearchResultsEntity.from_raw_results() method
+        需要实现的搜索函数。
+        该函数应以搜索数据和配置作为输入。
+        该函数应返回原始搜索结果，这些结果将由 SearchResultsEntity.from_raw_results() 方法转换为搜索结果实体。
         '''
         pass
     
     def run(self, data: SearchDataEntity) -> SearchResultsEntity:
-        '''Run the search function with the given data and config.'''
+        '''使用给定的数据和配置运行搜索函数。'''
         self.check_data(data)
         data_args, data_kwargs = data.get_inputs()
         config_args, config_kwargs = self.config.get_inputs()
         args, kwargs = self.merge_inputs(data_args, data_kwargs, config_args, config_kwargs)
         raw_results = self.search_method(*args, **kwargs)
-        results = self.results_type.from_raw_results(raw_results,data)
+        results = self.results_type.from_raw_results(raw_results, data)
         return results

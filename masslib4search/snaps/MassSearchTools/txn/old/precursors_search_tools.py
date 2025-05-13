@@ -22,7 +22,7 @@ def search_block_precursors(
     RT_tolerance: float = 0.1,
     chunk_size: int = 5120,
 ) -> pd.DataFrame: # columns: qry_ids, ref_ids
-    I = mz_search(
+    I,D = mz_search(
         qry_ions_array, ref_precursor_mzs_array,
         mz_tolerance, mz_tolerance_type,
         ref_RTs,query_RTs,RT_tolerance,
