@@ -17,11 +17,13 @@
 - [`EmbeddingSimilarity`](#embedding-similarity-anchor)：嵌入向量相似度计算工具，输出二维相似度矩阵。
 - [`SpectrumSimilarity`](#spectrum-similarity-anchor)：谱图相似度计算工具，输出二维相似度矩阵。
 - [`PeakMZSearch`](#peak-mz-search-anchor)：基于m/z值的质谱峰搜索工具箱，封装m/z峰搜索流程，提供配置化的计算参数管理。
+- [`PeakPatternSearch`](#peak-pattern-search-anchor)：基于质谱图结构的模式匹配搜索工具箱，封装质谱图结构的模式匹配搜索流程，提供配置化的计算参数管理。
 
 对于这些工具函数组的命名上也有一些约定：
 - Embedding~：表示这个工具函数组的输入为规整的向量格式，最小处理单元为embedding-chunk。
 - Spectrum~：表示这个工具函数组的输入为质谱图张量格式，这种输入往往是nested结构，即每个谱图的长度不一致，最小处理单元为单个谱图。
 - ~Similarity：相似度计算工具组，用于计算全量相似度矩阵，这种工具会对输入的Query和Ref进行pairwise计算，并计算出二维相似度矩阵。
+- ~Search：搜索工具组，用于搜索质谱数据，提供配置化的计算参数管理。这种工具的一般输出为`Tuple[Ref-Index,Score]`，如果搜索结果是基于离散逻辑的（如PeakPatternSearch），则没有`Score`信息的输出。
 
 ### <a id="binning-anchor"></a> SpectrumBinning
 质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。
@@ -529,3 +531,135 @@ result_indices, result_deltas = peak_mz_search_tool.run(qry_ions, ref_mzs, qry_R
 
 # 处理嵌套结构数据
 nested_result = peak_mz_search_tool.run_by_queue(qry_ions_queue, ref_mzs_queue, qry_RTs_queue, ref_RTs_queue)
+```
+
+### <a id="peak-pattern-search-anchor"></a> PeakPatternSearch
+基于质谱图结构的模式匹配搜索工具箱，封装质谱图结构的模式匹配搜索流程，提供配置化的计算参数管理，支持设备自动分配策略、批处理并行计算以及嵌套数据结构处理。
+
+#### 核心功能
+- 封装质谱图结构的模式匹配搜索流程
+- 提供配置化的计算参数管理
+- 支持设备自动分配策略
+- 批处理并行计算
+- 嵌套数据结构处理
+
+#### 配置参数
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| loss_tolerance | float | 0.1 | 中心丢失边匹配的容差阈值（单位：Da） |
+| mz_tolerance | float | 3 | m/z容差值（ppm或Da） |
+| mz_tolerance_type | Literal['ppm', 'Da'] | 'ppm' | 容差类型 |
+| chunk_size | int | 5120 | 并行处理分块大小 |
+| num_workers | Optional[int] | 4 | 工作进程数 |
+| work_device | Union[str, torch.device, Literal['auto']] | 'auto' | 计算设备（自动推断策略：优先使用输入数据所在设备） |
+| output_device | Union[str, torch.device, Literal['auto']] | 'cpu' | 输出设备（强制保留在CPU） |
+
+#### 数据输入
+`PeakPatternSearch`工具支持嵌套结构输入：
+
+- 输入格式: `qry_mzs_queue: List[List[torch.Tensor]]`, `refs_queue: List['SpectrumPatternWrapper']`
+- 形状: 
+  - `qry_mzs_queue`: 外层列表表示不同批次，内层列表为单批次的查询，每个元素为 (N_q,) 的张量
+  - `refs_queue`: 对应每个批次的参考图包装类列表，每个包装类包含预定义的质谱图和损失值
+- 数据类型: `torch.float32`
+- 示例:
+  ```python
+  query_mzs_queue = [
+      [torch.tensor([149.05970595, 277.15869171, 295.1692564, 313.17982108, 373.20095045, 433.22207982, 581.27450931])]  # 查询组1
+  ]
+  graph_0 = nx.Graph()
+  graph_0.add_edges_from([
+      (0, 1, {'type':0}),
+  ])
+  graph_1 = nx.Graph()
+  graph_1.add_edges_from([
+      (0, 1, {'type':0}),
+      (1, 2, {'type':0}),
+  ])
+  losses = pd.Series([60.0],index=[0])
+  refs_queue = [
+      SpectrumPatternWrapper(
+          graphs=pd.Series([graph_0, graph_1]),
+          losses=losses
+      )
+  ]
+  ```
+
+#### 数据输出
+
+- **run()方法输出** (单层结构处理):
+  - 输出类型: `List[torch.Tensor]`
+  - 形状: 
+    - 匹配索引张量：(M,), 对应每个匹配的参考图索引
+  - 设备位置: 输出结果强制保留在CPU
+  - 示例:
+    ```python
+    # 输入结构: [ [查询组1] ]
+    result = peak_pattern_search_tool.run(query_mzs_queue[0][0], refs_queue[0])
+    # result = [torch.Size([M,])]
+    ```
+
+- **run_by_queue()方法输出** (嵌套结构处理):
+  - 输出类型: `List[List[torch.Tensor]]`
+  - 结构特点: 保持与输入相同的嵌套层级
+  - 每个元素的形状: 
+    - 匹配索引张量：(M,), 对应每个匹配的参考图索引
+  - 设备位置: 输出结果强制保留在CPU
+  - 示例:
+    ```python
+    # 输入结构: [ [查询组1], [查询组2] ]
+    nested_result = peak_pattern_search_tool.run_by_queue(query_mzs_queue, refs_queue)
+    # nested_result = [ [torch.Size([M1,])], [torch.Size([M2,])] ]
+    ```
+
+#### 使用示例
+```python
+from masslib4search.snaps.MassSearchTools.utils.toolbox import PeakPatternSearch, SpectrumPatternWrapper
+import torch
+import pandas as pd
+import networkx as nx
+
+# 构建测试数据
+query_mzs_queue = [
+    [torch.tensor([149.05970595, 277.15869171, 295.1692564, 313.17982108, 373.20095045, 433.22207982, 581.27450931])]  # 查询组1
+] * 2
+graph_0 = nx.Graph()
+graph_0.add_edges_from([
+    (0, 1, {'type':0}),
+])
+graph_1 = nx.Graph()
+graph_1.add_edges_from([
+    (0, 1, {'type':0}),
+    (1, 2, {'type':0}),
+])
+losses = pd.Series([60.0],index=[0])
+refs_queue = [
+    SpectrumPatternWrapper(
+        graphs=pd.Series([graph_0, graph_1]),
+        losses=losses
+    )
+] * 2
+
+# 初始化工具
+peak_pattern_search_tool = PeakPatternSearch(
+    loss_tolerance=0.1,
+    mz_tolerance=3,
+    mz_tolerance_type='ppm',
+    chunk_size=5120,
+    num_workers=None,
+    work_device='auto',
+    output_device='cpu'
+)
+
+# 处理单组搜索
+results = peak_pattern_search_tool.run(query_mzs_queue[0], refs_queue[0])
+print(results)
+# 输出:
+# [torch.Tensor([0,1])]
+
+# 处理嵌套结构数据
+nested_result = peak_pattern_search_tool.run_by_queue(query_mzs_queue, refs_queue)
+print(nested_result)
+# 输出：
+# [[torch.Tensor([0,1])],[torch.Tensor([0,1])]]
+```
