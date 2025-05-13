@@ -18,6 +18,7 @@
 - [`SpectrumSimilarity`](#spectrum-similarity-anchor)：谱图相似度计算工具，输出二维相似度矩阵。
 - [`PeakMZSearch`](#peak-mz-search-anchor)：基于m/z值的质谱峰搜索工具箱，封装m/z峰搜索流程，提供配置化的计算参数管理。
 - [`PeakPatternSearch`](#peak-pattern-search-anchor)：基于质谱图结构的模式匹配搜索工具箱，封装质谱图结构的模式匹配搜索流程，提供配置化的计算参数管理。
+- [`EmbeddingSimilaritySearch`](#embedding-similarity-search-anchor)：嵌入向量相似度搜索工具，输出最相关的参考向量的索引和相似度分数。
 
 对于这些工具函数组的命名上也有一些约定：
 - Embedding~：表示这个工具函数组的输入为规整的向量格式，最小处理单元为embedding-chunk。
@@ -663,3 +664,126 @@ print(nested_result)
 # 输出：
 # [[torch.Tensor([0,1])],[torch.Tensor([0,1])]]
 ```
+
+### <a id="embedding-similarity-search-anchor"></a> EmbeddingSimilaritySearch
+嵌入向量相似度搜索工具盒，输入嵌入向量并指定相似度算子，计算查询向量与参考向量之间的相似度矩阵。
+
+#### 核心功能
+- 封装嵌入向量相似度搜索流程
+- 提供配置化的计算参数管理
+- 支持设备自动分配策略
+- 批处理并行计算
+- 嵌套数据结构处理
+
+#### 配置参数
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| sim_operator | Type[EmbbedingSimilarityOperator] | CosineOperator | 用于计算嵌入向量之间相似度的算子 |
+| chunk_size | int | 5120 | 并行计算时每次处理的向量块大小 |
+| top_k | Optional[int] | None | 每个查询向量返回前top_k个最相关的参考向量的索引和相似度分数 |
+| batch_size | int | 128 | 批处理大小 |
+| num_workers | int | 4 | 数据预处理并行度 |
+| work_device | Union[str, torch.device, Literal['auto']] | 'auto' | 计算设备（自动推断策略：优先使用输入数据所在设备） |
+| output_device | Union[str, torch.device, Literal['auto']] | 'auto' | 结果存储设备（默认与计算设备一致） |
+| operator_kwargs | Optional[dict] | None | 相似度计算算子的额外参数 |
+
+**相似度算子**
+
+在masslib4search/snaps/MassSearchTools/utils/similarity/operators.py中，我们预定义了以下算子：
+  - CosineOperator (默认使用)：余弦相似度
+  - DotOperator：点积
+  - JaccardOperator：杰卡德相似度
+  - TanimotoOperator：谷本系数
+  - PearsonOperator：皮尔逊相关系数
+
+所有计算向量相似度的算子均是`EmbbedingSimilarityOperator`的子类，用户可以自定义算子实现自定义相似度计算。
+`EmbbedingSimilarityOperator`类的详细接口见masslib4search/snaps/MassSearchTools/utils/similarity/operators/ABC_operator.py
+
+#### 数据输入
+`EmbeddingSimilaritySearch`工具支持两种输入模式：
+
+1. **单层结构输入**:
+   - 输入格式: `query: torch.Tensor`, `ref: torch.Tensor`
+   - 形状: 
+     - `query`: (n_q, dim)
+     - `ref`: (n_r, dim)
+   - 数据类型: `torch.float32`
+   - 示例:
+     ```python
+     query = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+     ref = torch.tensor([[5.0, 6.0], [7.0, 8.0]])
+     ```
+
+2. **嵌套结构输入**:
+   - 输入格式: `query_queue: List[torch.Tensor]`, `ref_queue: List[torch.Tensor]`
+   - 形状: 
+     - 每个`query_queue`元素: (n_q, dim)
+     - 每个`ref_queue`元素: (n_r, dim)
+   - 数据类型: `torch.float32`
+   - 适用于处理多个样本或实验的批量相似度搜索操作
+   - 示例:
+     ```python
+     query_queue = [
+         torch.tensor([[1.0, 2.0], [3.0, 4.0]]),  # 查询组1
+         torch.tensor([[5.0, 6.0], [7.0, 8.0]])   # 查询组2
+     ]
+     ref_queue = [
+         torch.tensor([[9.0, 10.0], [11.0, 12.0]]),  # 参考组1
+         torch.tensor([[13.0, 14.0], [15.0, 16.0]])   # 参考组2
+     ]
+     ```
+
+#### 数据输出
+`EmbeddingSimilaritySearch`工具的输出格式根据调用方法不同而有所区别：
+
+1. **run()方法输出** (单层结构处理):
+   - 输出类型: `Tuple[torch.Tensor, torch.Tensor]`
+   - 形状: `(n_q, n_r)` 对于索引矩阵，`(n_q, n_r)` 对于相似度分数矩阵
+   - 数据类型: `torch.float32` 对于相似度分数矩阵，`torch.long` 对于索引矩阵
+   - 设备位置: 默认与计算设备相同，可通过`output_device`参数指定
+   - 示例:
+     ```python
+     # 输入2个查询向量和2个参考向量 → 相似度矩阵和索引矩阵 (2x2)
+     indices, scores = embedding_similarity_search_tool.run(query, ref)
+     indices.shape  # torch.Size([2, 2])
+     scores.shape  # torch.Size([2, 2])
+     ```
+
+2. **run_by_queue()方法输出** (嵌套结构处理):
+   - 输出类型: `List[Tuple[torch.Tensor, torch.Tensor]]`
+   - 结构特点: 保持与输入相同的嵌套层级
+   - 每个元素的形状: `(n_q, n_r)` 对于索引矩阵，`(n_q, n_r)` 对于相似度分数矩阵
+   - 示例:
+     ```python
+     # 输入结构: [ [查询组1,查询组2], [查询组3] ]
+     results = embedding_similarity_search_tool.run_by_queue(query_queue, ref_queue)
+     results[0][0].shape  # 第一组结果的索引矩阵形状
+     results[0][1].shape  # 第一组结果的相似度矩阵形状
+     results[1][0].shape  # 第二组结果的索引矩阵形状
+     results[1][1].shape  # 第二组结果的相似度矩阵形状
+     ```
+
+#### 使用示例
+```python
+from masslib4search.snaps.MassSearchTools.utils.toolbox import EmbeddingSimilaritySearch
+from masslib4search.snaps.MassSearchTools.utils.similarity.operators import CosineOperator
+
+# 初始化工具
+embedding_similarity_search_tool = EmbeddingSimilaritySearch(
+    sim_operator=CosineOperator,
+    chunk_size=1024,
+    top_k=2,
+    batch_size=128,
+    num_workers=4,
+    work_device='auto',
+    output_device='auto',
+    operator_kwargs=None
+)
+
+# 处理单层结构数据
+indices, scores = embedding_similarity_search_tool.run(query, ref)
+
+# 处理嵌套结构数据
+nested_results = embedding_similarity_search_tool.run_by_queue(query_queue, ref_queue)
+```
+

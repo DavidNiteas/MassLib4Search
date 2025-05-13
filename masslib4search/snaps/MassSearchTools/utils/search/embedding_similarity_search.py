@@ -81,7 +81,7 @@ def emb_similarity_search_cpu(
             results.append(final_scores)
             indices_list.append(final_indices)
 
-    return torch.cat(results, dim=0), torch.cat(indices_list, dim=0)
+    return torch.cat(indices_list, dim=0),torch.cat(results, dim=0)
 
 @torch.no_grad()
 def emb_similarity_search_cuda(
@@ -205,8 +205,8 @@ def emb_similarity_search_cuda(
     # 全局同步并返回结果
     torch.cuda.synchronize()
     return (
+        torch.cat(all_indices, dim=0),
         torch.cat(all_scores, dim=0), 
-        torch.cat(all_indices, dim=0)
     )
 
 def emb_similarity_search(
@@ -219,6 +219,25 @@ def emb_similarity_search(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    """
+    计算查询向量与参考向量集之间的相似度，并根据相似度返回前top_k个最相关的参考向量的索引和相似度分数。
+    
+    参数:
+    - query: 查询向量集，形状为(n_q, dim)，其中n_q是查询向量的数量，dim是向量的维度。
+    - ref: 参考向量集，形状为(n_r, dim)，其中n_r是参考向量的数量，dim是向量的维度。
+    - sim_operator: 用于计算相似度的算子，默认为余弦相似度算子(CosineOperator)。
+    - top_k: 每个查询向量返回前top_k个最相关的参考向量的索引和相似度。如果不指定，则返回与所有参考向量的相似度。
+    - chunk_size: 用于分块处理的大小，以减少内存使用。
+    - work_device: 在其上执行计算的设备，默认为'auto'，表示自动推断设备。
+    - output_device: 在其上返回结果的设备，默认为'auto'，表示自动推断设备。
+    - operator_kwargs: 传递给sim_operator的额外参数，可选。
+    
+    返回:
+    - indices: 对应于scores的参考向量索引矩阵，形状为(n_q, n_r)或(n_q, top_k)。
+    - scores: 查询向量与参考向量之间的相似度分数矩阵，形状为(n_q, n_r)或(n_q, top_k)。
+    - 所有返回结果均按照scores进行排序，从高到低。
+    """
     
     # 自动推断工作设备
     _work_device = resolve_device(work_device, query.device)
@@ -248,6 +267,27 @@ def emb_similarity_search_by_queue(
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    
+    """
+    使用队列中的多个查询向量集和参考向量集，计算它们之间的相似度，并返回每个查询向量集与参考向量集之间前top_k个最相关的参考向量的索引和相似度分数。
+    
+    参数:
+    - query_queue: 查询向量集的列表，每个元素的形状为(n_q, dim)。
+    - ref_queue: 参考向量集的列表，每个元素的形状为(n_r, dim)。
+    - sim_operator: 用于计算相似度的算子，默认为余弦相似度算子(CosineOperator)。
+    - top_k: 每个查询向量返回前top_k个最相关的参考向量的索引和相似度。如果不指定，则返回与所有参考向量的相似度。
+    - chunk_size: 用于分块处理的大小，以减少内存使用。
+    - num_workers: 用于处理任务的线程数，用于并行处理。
+    - work_device: 在其上执行计算的设备，默认为'auto'，表示自动推断设备。
+    - output_device: 在其上返回结果的设备，默认为'auto'，表示自动推断设备。
+    - operator_kwargs: 传递给sim_operator的额外参数，可选。
+    
+    返回:
+    - results: 一个包含多个元组的列表，每个元组包含indices和scores两个torch.Tensor。
+        - indices是对应于scores的参考向量索引矩阵
+        - scores是查询向量与参考向量之间的相似度分数矩阵。
+    - 所有返回结果均按照scores进行排序，从高到低。
+    """
     
     # 自动推断工作设备
     _work_device = resolve_device(work_device, query_queue[0].device)
