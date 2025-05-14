@@ -2,11 +2,20 @@
 用于快速构建可搜索质谱数据集的Python库，并提供常见的搜索任务与工具函数.
 
 ## 库结构
-- `masslib4search.snaps.MassSearchTools`：定义了常见的搜索任务与工具函数。
+- `masslib4search.snaps.MassSearchTools`：定义了常见的搜索任务与工具函数,其中可用的工具包括：
+  - [`Searcher工具`](#searcher-anchor)：用于快速构建可搜索质谱数据集的Python库，并提供常见的搜索任务与工具函数。
+  - [`工具函数组`](#toolbox-anchor)：封装了常见的搜索任务与工具函数，并提供配置化的计算参数管理。
 
-## 工具函数组
-工具函数是MassLib4Search库对外暴露的最低级别的API，用户可以通过组合这些函数来构建自己的搜索业务逻辑。
-同时，相同功能但存在细微差别的函数群可以组成工具函数组。MassLib4Search库把它们聚合在一起，并抽象为`ToolBox`类，方便用户调用。
+## <a id="searcher-anchor"></a>Searcher工具
+Searcher工具是`MassSearchTools`库的核心组件，设计了一套Searcher实现的接口与流程，并提供了一些常用的谱图搜索流程，这些工作流被打包成了相对应的Searcher类：
+- [`PrecursorSearcher`](#precursor-searcher-anchor)：用于搜索母离子的Searcher类。
+
+### <a id="precursor-searcher-anchor"></a> PrecursorSearcher
+
+
+## <a id="toolbox-anchor"></a>工具函数组
+工具函数是`MassSearchTools`库对外暴露的最低级别的API，用户可以通过组合这些函数来构建自己的搜索业务逻辑。
+同时，相同功能但存在细微差别的函数群可以组成工具函数组。`MassSearchTools`库把它们聚合在一起，并抽象为`ToolBox`类，方便用户调用。
 本质上来说，`ToolBox`类是一个具有`run`方法和`run_by_queue`的`BaseModel`对象的子类，分别用于处理**单组数据**和**队列数据**。
 - `run`方法：处理数据的基本方法，输入为单组数据，输出为处理后的单组数据。
 - `run_by_queue`方法：在实际工作中，数据可能会分组，每一组数据之间是互相隔离的，这种情况对于需要query和ref进行配对的搜索任务来说是非常常见的。该方法主要针对这种情况设计。输入为队列数据，输出为处理后的队列数据。在这个过程中，分组结构保持不变。
@@ -25,7 +34,10 @@
 - Embedding~：表示这个工具函数组的输入为规整的向量格式，最小处理单元为embedding-chunk。
 - Spectrum~：表示这个工具函数组的输入为质谱图张量格式，这种输入往往是nested结构，即每个谱图的长度不一致，最小处理单元为单个谱图。
 - ~Similarity：相似度计算工具组，用于计算全量相似度矩阵，这种工具会对输入的Query和Ref进行pairwise计算，并计算出二维相似度矩阵。
-- ~Search：搜索工具组，用于搜索质谱数据，提供配置化的计算参数管理。这种工具的一般输出为`Tuple[Ref-Index,Score]`，如果搜索结果是基于离散逻辑的（如PeakPatternSearch），则没有`Score`信息的输出。
+- ~Search：搜索工具组，用于搜索质谱数据，提供配置化的计算参数管理。这种工具的一般输出为`Tuple[Index,Score]`，根据函数所针对的搜索任务不同，`Index`和`Score`的类型也不同：
+  - 如果搜索结果是基于离散逻辑的（如PeakPatternSearch），则没有`Score`信息的输出。
+  - 如果Search函数的输入参数中存在参数`topk`，则`Index`是一个二维张量，形状为`(num_queries, topk)`，其中存放这ref的索引；`Score`和`Index`完全对应，内部存放着每一个ref的分数。
+  - 如果Search函数的输入参数中不存在参数`topk`，则`Index`是一个二维张量，形状为`(num_hits, 2)`，0为query索引，1为ref索引；`Score`是一个一维张量，形状为`(num_hits)`，存放每一组hit的分数。
 
 ### <a id="binning-anchor"></a> SpectrumBinning
 质谱数据分箱处理工具，可将离散质谱峰（m/z）聚合为规整特征向量。

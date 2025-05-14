@@ -4,10 +4,11 @@ from ...utils.toolbox.ms_peak_search import PeakMZSearch
 from pydantic import Field
 import torch
 import pandas as pd
+import numpy as np
+from numpy.typing import NDArray
 import dask
 import dask.bag as db
-import logging
-from typing import Optional, Literal, List, Tuple, Union, Sequence, Hashable, Dict
+from typing import Optional, Literal, List, Tuple, Union, Sequence, Hashable
 
 class PrecursorSearchDatas(SearchDataEntity):
     
@@ -27,29 +28,29 @@ class PrecursorSearchDatas(SearchDataEntity):
                     'ref_RTs_queue': [torch.tensor(self.ref_rts.values)]
                 }
         else:
-            qry_mzs_bag = db.from_sequence(zip(self.qry_mzs,self.tag_refs_ids))
+            mzs_bag = db.from_sequence(zip(self.qry_mzs,self.tag_refs_ids))
             
             def get_mz_pair_queue(x: Tuple[float,pd.Index]) -> Tuple[torch.Tensor,torch.Tensor]:
                 qry_mz, tag_refs_id = x
                 ref_mzs = self.ref_mzs.loc[tag_refs_id]
                 return (torch.tensor([qry_mz]), torch.tensor(ref_mzs.values))
             
-            qry_mzs_bag = qry_mzs_bag.map(get_mz_pair_queue)
-            qry_mzs_bag = qry_mzs_bag.pluck(0)
-            ref_mzs_bag = qry_mzs_bag.pluck(1)
+            mzs_bag = mzs_bag.map(get_mz_pair_queue)
+            qry_mzs_bag = mzs_bag.pluck(0)
+            ref_mzs_bag = mzs_bag.pluck(1)
             args = dask.compute(qry_mzs_bag, ref_mzs_bag, scheduler='threads')
             kwargs = {}
             if self.qry_rts is not None and self.ref_rts is not None:
-                qry_rts_bag = db.from_sequence(zip(self.qry_rts,self.tag_refs_ids))
+                rts_bag = db.from_sequence(zip(self.qry_rts,self.tag_refs_ids))
                 
                 def get_RT_pair_queue(x: Tuple[float,pd.Index]) -> Tuple[torch.Tensor,torch.Tensor]:
                     qry_RT, tag_refs_id = x
                     ref_RTs = self.ref_rts.loc[tag_refs_id]
                     return (torch.tensor([qry_RT]), torch.tensor(ref_RTs.values))
                 
-                qry_rts_bag = qry_rts_bag.map(get_RT_pair_queue)
-                qry_rts_bag = qry_rts_bag.pluck(0)
-                ref_rts_bag = qry_rts_bag.pluck(1)
+                rts_bag = rts_bag.map(get_RT_pair_queue)
+                qry_rts_bag = rts_bag.pluck(0)
+                ref_rts_bag = rts_bag.pluck(1)
                 qry_RT_queue, ref_RT_queue = dask.compute(qry_rts_bag, ref_rts_bag, scheduler='threads')
                 kwargs.update({
                     'qry_RTs_queue': qry_RT_queue,
@@ -64,19 +65,26 @@ class PrecursorSearchDatas(SearchDataEntity):
         ref_mzs: Sequence[float],
         qry_rts: Optional[Sequence[float]] = None,
         ref_rts: Optional[Sequence[float]] = None,
-        tag_refs_ids: Optional[pd.Series] = None,
-        index: Optional[Sequence[Hashable]] = None,
+        qry_ids: Optional[Sequence[Hashable]] = None,
+        ref_ids: Optional[Sequence[Hashable]] = None,
+        tag_refs_ids: Optional[Sequence[Sequence[Hashable]]] = None,
     ) -> PrecursorSearchDatas:
+        qry_ids = pd.Index(qry_ids) if qry_ids is not None else pd.RangeIndex(start=0,stop=len(qry_mzs),step=1)
+        ref_ids = pd.Index(ref_ids) if ref_ids is not None else pd.RangeIndex(start=0,stop=len(ref_mzs),step=1)
+        qry_mzs=pd.Series(qry_mzs, index=qry_ids)
+        ref_mzs=pd.Series(ref_mzs, index=ref_ids)
+        qry_rts=pd.Series(qry_rts, index=qry_ids) if qry_rts is not None else None
+        ref_rts=pd.Series(ref_rts, index=ref_ids) if ref_rts is not None else None
         if tag_refs_ids is not None:
             tag_refs_ids_bag = db.from_sequence(tag_refs_ids)
-            tag_refs_ids_bag = tag_refs_ids_bag.map(lambda x: pd.Index(x))
+            tag_refs_ids_bag = tag_refs_ids_bag.map(lambda x: pd.Index(x).intersection(ref_ids))
             tag_refs_ids = dask.compute(tag_refs_ids_bag, scheduler='threads')[0]
-            tag_refs_ids = pd.Series(tag_refs_ids,index=index)
+            tag_refs_ids = pd.Series(tag_refs_ids,index=qry_ids)
         return cls(
-            qry_mzs=pd.Series(qry_mzs, index=index),
-            ref_mzs=pd.Series(ref_mzs, index=index),
-            qry_rts=pd.Series(qry_rts, index=index) if qry_rts is not None else None,
-            ref_rts=pd.Series(ref_rts, index=index) if ref_rts is not None else None,
+            qry_mzs=qry_mzs,
+            ref_mzs=ref_mzs,
+            qry_rts=qry_rts,
+            ref_rts=ref_rts,
             tag_refs_ids=tag_refs_ids
         )
     
@@ -105,7 +113,7 @@ class PrecursorSearchConfig(SearchConfigEntity):
     )
     
     def get_inputs(self):
-        return (),{
+        return (None,None),{
             'mz_tolerance': self.mz_tolerance,
             'mz_tolerance_type': self.mz_tolerance_type,
             'RT_tolerance': self.RT_tolerance,
@@ -155,6 +163,34 @@ class PrecursorSearchResults(SearchResultsEntity):
             results_table = pd.concat(results_table_list,axis=0,ignore_index=True)
         
         return cls(results_table=results_table)
+    
+    @property
+    def qry_ids(self) -> pd.Series:
+        return self.results_table['qry_ids']
+    
+    @property
+    def ref_ids(self) -> pd.Series:
+        return self.results_table['ref_ids']
+    
+    @property
+    def deltas(self) -> NDArray[np.float32]:
+        return self.results_table['delta']
+    
+    @property
+    def unique_qry_ids(self) -> pd.Index:
+        return pd.Index(self.qry_ids.unique())
+    
+    @property
+    def unique_ref_ids(self) -> pd.Index:
+        return pd.Index(self.ref_ids.unique())
+    
+    @property
+    def tag_refs_ids(self) -> pd.Series:
+        return (
+            self.results_table
+            .groupby('qry_ids', group_keys=False)['ref_ids']
+            .apply(pd.Index)
+        )
     
 class PrecursorSearcher(Searcher):
     

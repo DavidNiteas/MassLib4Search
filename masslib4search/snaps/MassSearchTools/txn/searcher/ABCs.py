@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, ConfigDict
-from typing import TypeVar, Type, Dict, Tuple, Any, Optional, List, Sequence
+from typing import TypeVar, Type, Dict, Tuple, Any, Optional, List, Sequence, ClassVar
 
 data_entity_type = TypeVar('data_entity_type', bound='SearchDataEntity')
 config_entity_type = TypeVar('config_entity_type', bound='SearchConfigEntity')
@@ -59,8 +59,8 @@ class Searcher(BaseModel, ABC):
     model_config = ConfigDict(extra='forbid', slots=True, arbitrary_types_allowed=True)
     
     # 类变量
-    input_type = SearchDataEntity
-    results_type = SearchResultsEntity
+    input_type: ClassVar[Type[SearchDataEntity]] = SearchDataEntity
+    results_type: ClassVar[Type[SearchResultsEntity]] = SearchResultsEntity
     
     # 实例变量
     config: SearchConfigEntity
@@ -82,7 +82,7 @@ class Searcher(BaseModel, ABC):
     ]:
         args = []
         for data, config in zip(data_args, config_args):
-            args.append(config if config is not None else data)
+            args.append(data if data is not None else config)
         kwargs = {**data_kwargs, **config_kwargs}
         return tuple(args), kwargs
     
