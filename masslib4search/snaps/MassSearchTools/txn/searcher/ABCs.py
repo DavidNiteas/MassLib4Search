@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, ConfigDict
+import pandas as pd
 from typing import TypeVar, Type, Dict, Tuple, Any, Optional, List, Sequence, ClassVar
 
 data_entity_type = TypeVar('data_entity_type', bound='SearchDataEntity')
@@ -51,6 +52,31 @@ class SearchResultsEntity(BaseModel, ABC):
         data: SearchDataEntity,
     ) -> results_entity_type:
         '''将原始搜索结果转换为搜索结果实体。'''
+        pass
+    
+    @property
+    @abstractmethod
+    def qry_ids(self) -> pd.Series:
+        pass
+    
+    @property
+    @abstractmethod
+    def ref_ids(self) -> pd.Series:
+        pass
+    
+    @property
+    @abstractmethod
+    def unique_qry_ids(self) -> pd.Index:
+        pass
+    
+    @property
+    @abstractmethod
+    def unique_ref_ids(self) -> pd.Index:
+        pass
+    
+    @property
+    @abstractmethod
+    def tag_refs_ids(self) -> pd.Series:
         pass
 
 class Searcher(BaseModel, ABC):

@@ -1,5 +1,6 @@
 import torch
 from ..torch_device import resolve_device
+from ..results_tools import topk_to_hit
 from ..similarity.embedding_similarity import (
     cosine,
     EmbbedingSimilarityOperator,
@@ -16,72 +17,87 @@ def emb_similarity_search_cpu(
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
     top_k: Optional[int] = None,
     chunk_size: int = 5120,
+    output_mode: Literal['top_k', 'hit'] = 'top_k',
     work_device: torch.device = torch.device("cpu"),
     output_device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
     # 设备配置
     output_device = output_device or work_device
+    ref_num = ref.size(0)  # 获取参考集总数
+    top_k = ref_num if top_k is None else top_k  # 自动对齐参考集数量
+    
+    # 空查询集
+    if len(query) == 0:
+        return (
+            torch.tensor([], device=output_device, dtype=torch.long).reshape(0, top_k),
+            torch.tensor([], device=output_device, dtype=torch.float32).reshape(0, top_k)
+        )
+        
+    # 空参考集
+    if len(ref) == 0:
+        return (
+            torch.full((len(query),top_k), -1, device=output_device, dtype=torch.long),
+            torch.full((len(query),top_k), -float('inf'), device=output_device, dtype=torch.float32),
+        )
+    
+    # 初始化全局缓冲区模板
+    scores_template = torch.full((top_k,), -float('inf'), 
+                                device=work_device, dtype=torch.float32)
+    indices_template = torch.full((top_k,), -1, 
+                                device=work_device, dtype=torch.long)
     
     results = []
     indices_list = []
 
-    # 分块处理查询集（流式传输）
+    # 分块处理查询集
     for q_chunk in query.split(chunk_size):
-        # 即时转移设备（自动处理non_blocking）
         q_work = q_chunk.to(work_device)
+        batch_size = q_work.size(0)
         
-        current_scores = None
-        current_indices = None
+        # 初始化每批查询的缓冲区 (batch_size, top_k)
+        scores_buf = scores_template[None, :].expand(batch_size, -1).clone()
+        indices_buf = indices_template[None, :].expand(batch_size, -1).clone()
 
         # 分块处理参考集
         for r_idx, r_chunk in enumerate(ref.split(chunk_size)):
-            r_work = r_chunk.to(work_device)  # 即时转移设备
+            r_work = r_chunk.to(work_device)
+            sim = sim_operator(q_work, r_work)  # (batch_size, ref_chunk_size)
             
-            # 计算相似度
-            sim = sim_operator(q_work, r_work)
-            
-            # 生成索引（在工作设备创建）
+            # 生成全局索引
             start_idx = r_idx * chunk_size
-            indices = torch.arange(
-                start_idx,
-                start_idx + r_work.size(0),
-                device=work_device
-            )
+            indices = torch.arange(start_idx, start_idx + r_work.size(0), 
+                                    device=work_device)
+            
+            # 向量化合并逻辑
+            combined_scores = torch.cat([scores_buf, sim], dim=1)
+            combined_indices = torch.cat([
+                indices_buf, 
+                indices.expand(batch_size, -1)
+            ], dim=1)
+            
+            # 保留TopK
+            top_scores, top_pos = torch.topk(combined_scores, top_k, dim=1)
+            scores_buf = top_scores
+            indices_buf = torch.gather(combined_indices, 1, top_pos)
 
-            # 结果合并逻辑
-            if top_k is not None:
-                # TopK模式
-                chunk_scores, chunk_indices = torch.topk(sim, min(top_k, sim.size(1)), dim=1)
-                chunk_indices = indices[chunk_indices]
-
-                if current_scores is not None:
-                    combined_scores = torch.cat([current_scores, chunk_scores], dim=1)
-                    combined_indices = torch.cat([current_indices, chunk_indices], dim=1)
-                    current_scores, top_pos = torch.topk(combined_scores, top_k, dim=1)
-                    current_indices = combined_indices.gather(1, top_pos)
-                else:
-                    current_scores, current_indices = chunk_scores, chunk_indices
-            else:
-                # 全量模式
-                current_scores = sim if current_scores is None else torch.cat([current_scores, sim], dim=1)
-                current_indices = indices.expand_as(sim) if current_indices is None else torch.cat(
-                    [current_indices, indices.expand_as(sim)], dim=1)
-                
-        # 处理完成后转移至output_device
-        final_scores = current_scores.to(output_device, non_blocking=True)
-        final_indices = current_indices.to(output_device, non_blocking=True)
+        # 后处理：确保严格排序（仅在需要时）
+        if top_k < ref_num:
+            sorted_idx = torch.argsort(scores_buf, dim=1, descending=True)
+            scores_buf = torch.gather(scores_buf, 1, sorted_idx)
+            indices_buf = torch.gather(indices_buf, 1, sorted_idx)
         
-        # 全量排序（仅在需要时执行）
-        if top_k is None:
-            sorted_scores, sorted_indices = torch.sort(final_scores, dim=1, descending=True)
-            results.append(sorted_scores)
-            indices_list.append(sorted_indices)
-        else:
-            results.append(final_scores)
-            indices_list.append(final_indices)
+        # 转移结果到目标设备
+        results.append(scores_buf.to(output_device))
+        indices_list.append(indices_buf.to(output_device))
 
-    return torch.cat(indices_list, dim=0),torch.cat(results, dim=0)
+    I, S = torch.cat(indices_list, dim=0), torch.cat(results, dim=0)
+    
+    # 切换输出格式
+    if output_mode == 'hit':
+        I, S = topk_to_hit(I, S)
+    
+    return I, S
 
 @torch.no_grad()
 def emb_similarity_search_cuda(
@@ -90,124 +106,126 @@ def emb_similarity_search_cuda(
     sim_operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = cosine,
     top_k: Optional[int] = None,
     chunk_size: int = 5120,
+    output_mode: Literal['top_k', 'hit'] = 'top_k',
     work_device: torch.device = torch.device("cuda:0"),
     output_device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    # 设备配置
+    output_device = output_device or work_device
+    is_same_device = work_device == output_device
+    ref_num = ref.size(0)
+    top_k = ref_num if top_k is None else top_k  # 自动对齐参考集数量
+    
+    # 空查询集
+    if len(query) == 0:
+        return (
+            torch.tensor([], device=output_device, dtype=torch.long).reshape(0, top_k),
+            torch.tensor([], device=output_device, dtype=torch.float32).reshape(0, top_k)
+        )
+        
+    # 空参考集
+    if len(ref) == 0:
+        return (
+            torch.full((len(query),top_k), -1, device=output_device, dtype=torch.long),
+            torch.full((len(query),top_k), -float('inf'), device=output_device, dtype=torch.float32),
+        )
     
     # 初始化三流
     input_stream = torch.cuda.Stream()
     compute_stream = torch.cuda.Stream()
     output_stream = torch.cuda.Stream()
-    
-    # 设备配置
-    output_device = output_device or torch.device("cpu")
-    is_same_device = work_device == output_device
 
-    # 数据预处理
+    # 数据预处理（异步）
     with torch.cuda.stream(input_stream):
-        query = query.to(work_device)
-        ref = ref.to(work_device)
-
-    all_scores, all_indices = [], []
+        query = query.to(work_device, non_blocking=True)
+        ref = ref.to(work_device, non_blocking=True)
     torch.cuda.synchronize()
 
+    # 缓冲区模板（固定内存）
+    with torch.cuda.stream(compute_stream):
+        scores_template = torch.full((top_k,), -float('inf'), 
+                                    device=work_device, dtype=torch.float32)
+        indices_template = torch.full((top_k,), -1, 
+                                    device=work_device, dtype=torch.long)
+
+    all_scores, all_indices = [], []
+    r_chunks = list(ref.split(chunk_size))
+
     # 主处理循环
-    for q_idx, q_chunk in enumerate(query.split(chunk_size)):
-        # 初始化当前查询块的存储
-        current_scores = None
-        current_indices = None
-        
+    for q_chunk in query.split(chunk_size):
+        # 初始化缓冲区（每个查询块独立）
+        with torch.cuda.stream(compute_stream):
+            batch_size = q_chunk.size(0)
+            scores_buf = scores_template[None, :].expand(batch_size, -1).clone()
+            indices_buf = indices_template[None, :].expand(batch_size, -1).clone()
+
         # 预加载第一个参考块
-        r_chunks = list(ref.split(chunk_size))
+        current_r = None
         with torch.cuda.stream(input_stream):
             current_r = r_chunks[0].to(work_device, non_blocking=True)
+        compute_events = [torch.cuda.Event() for _ in r_chunks]
 
-        # 创建同步事件
-        compute_done_events = [torch.cuda.Event() for _ in r_chunks]
-
-        # 处理参考块序列
         for i in range(len(r_chunks)):
             # 预加载下一个参考块
-            next_r = r_chunks[i+1] if i+1 < len(r_chunks) else None
-            if next_r is not None:
-                with torch.cuda.stream(input_stream):
+            next_r = r_chunks[i+1].to(work_device, non_blocking=True) if i+1 < len(r_chunks) else None
+            with torch.cuda.stream(input_stream):
+                if next_r is not None:
                     next_r = next_r.to(work_device, non_blocking=True)
 
             # 计算块处理
             with torch.cuda.stream(compute_stream):
-                # 等待数据就绪
                 compute_stream.wait_stream(input_stream)
-
-                # 执行相似度计算
+                
+                # 计算相似度
                 sim = sim_operator(q_chunk, current_r)
-
-                # 生成索引
                 indices = torch.arange(
-                    i * chunk_size,
-                    i * chunk_size + current_r.size(0),
+                    i * chunk_size, 
+                    i * chunk_size + current_r.size(0), 
                     device=work_device
                 )
 
-                # 结果合并逻辑
-                if top_k is not None:
-                    # 获取当前块的TopK
-                    chunk_scores, chunk_indices = torch.topk(
-                        sim, 
-                        min(top_k, sim.size(1)), 
-                        dim=1
-                    )
-                    chunk_indices = indices[chunk_indices]
+                # 合并到缓冲区
+                combined_scores = torch.cat([scores_buf, sim], dim=1)
+                combined_indices = torch.cat([
+                    indices_buf,
+                    indices[None, :].expand(batch_size, -1)
+                ], dim=1)
+                
+                # 保留TopK
+                scores_buf, top_pos = torch.topk(combined_scores, top_k, dim=1)
+                indices_buf = torch.gather(combined_indices, 1, top_pos)
+                
+                compute_events[i].record()
 
-                    # 合并历史结果
-                    if current_scores is not None:
-                        combined_scores = torch.cat([current_scores, chunk_scores], dim=1)
-                        combined_indices = torch.cat([current_indices, chunk_indices], dim=1)
-                        
-                        # 保留全局TopK
-                        current_scores, top_indices = torch.topk(combined_scores, top_k, dim=1)
-                        current_indices = torch.gather(combined_indices, 1, top_indices)
-                    else:
-                        current_scores, current_indices = chunk_scores, chunk_indices
-                else:
-                    # 全量结果累积
-                    current_scores = sim if current_scores is None else torch.cat([current_scores, sim], dim=1)
-                    current_indices = (
-                        indices.expand_as(sim) 
-                        if current_indices is None 
-                        else torch.cat([current_indices, indices.expand_as(sim)], dim=1)
-                    )
-
-                # 记录计算完成事件
-                compute_done_events[i].record()
-
-            # 更新参考块
             current_r = next_r
 
-        # 最终结果处理
+        # 最终排序（非全量模式）
         with torch.cuda.stream(compute_stream):
-            if top_k is None:
-                # 全局排序
-                sorted_scores, sorted_indices = torch.sort(current_scores, dim=1, descending=True)
-                current_scores, current_indices = sorted_scores, sorted_indices
+            if top_k < ref_num:
+                sorted_idx = torch.argsort(scores_buf, dim=1, descending=True)
+                scores_buf = torch.gather(scores_buf, 1, sorted_idx)
+                indices_buf = torch.gather(indices_buf, 1, sorted_idx)
 
         # 异步传输结果
         with torch.cuda.stream(output_stream):
-            # 等待最后一个参考块计算完成
-            compute_done_events[-1].synchronize()
-            
-            if is_same_device:
-                all_scores.append(current_scores)
-                all_indices.append(current_indices)
-            else:
-                all_scores.append(current_scores.to(output_device, non_blocking=True))
-                all_indices.append(current_indices.to(output_device, non_blocking=True))
+            compute_events[-1].synchronize()
+            transfer = (scores_buf if is_same_device 
+                        else scores_buf.to(output_device, non_blocking=True))
+            all_scores.append(transfer)
+            transfer = (indices_buf if is_same_device 
+                        else indices_buf.to(output_device, non_blocking=True))
+            all_indices.append(transfer)
 
-    # 全局同步并返回结果
+    # 全局同步
     torch.cuda.synchronize()
-    return (
-        torch.cat(all_indices, dim=0),
-        torch.cat(all_scores, dim=0), 
-    )
+    I, S = torch.cat(all_indices, dim=0),torch.cat(all_scores, dim=0)
+    
+    # 切换输出格式
+    if output_mode == 'hit':
+        I, S = topk_to_hit(I, S)
+        
+    return I, S
 
 def emb_similarity_search(
     query: torch.Tensor,
@@ -215,13 +233,14 @@ def emb_similarity_search(
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     top_k: int = None,
     chunk_size: int = 5120,
+    output_mode: Literal['top_k', 'hit'] = 'top_k',
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
     operator_kwargs: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
     """
-    计算查询向量与参考向量集之间的相似度，并根据相似度返回前top_k个最相关的参考向量的索引和相似度分数。
+    计算查询向量集与参考向量集之间的相似度，并根据相似度返回每个查询向量前top_k个最相关的参考向量的索引和相似度分数。
     
     参数:
     - query: 查询向量集，形状为(n_q, dim)，其中n_q是查询向量的数量，dim是向量的维度。
@@ -229,13 +248,20 @@ def emb_similarity_search(
     - sim_operator: 用于计算相似度的算子，默认为余弦相似度算子(CosineOperator)。
     - top_k: 每个查询向量返回前top_k个最相关的参考向量的索引和相似度。如果不指定，则返回与所有参考向量的相似度。
     - chunk_size: 用于分块处理的大小，以减少内存使用。
+    - output_mode: 返回结果的格式
+        - 'top_k'：返回每个查询向量的top_k个参考向量索引和相似度。
+        - 'hit'：以命中对的形式返回平整的索引和相似度。
     - work_device: 在其上执行计算的设备，默认为'auto'，表示自动推断设备。
     - output_device: 在其上返回结果的设备，默认为'auto'，表示自动推断设备。
     - operator_kwargs: 传递给sim_operator的额外参数，可选。
     
     返回:
-    - indices: 对应于scores的参考向量索引矩阵，形状为(n_q, n_r)或(n_q, top_k)。
-    - scores: 查询向量与参考向量之间的相似度分数矩阵，形状为(n_q, n_r)或(n_q, top_k)。
+    - 如果output_mode为'top_k':
+        - indices: 形状为(n_q, top_k)的参考向量索引矩阵，数据类型为long。包含每个查询向量最相关的top_k个参考向量的索引，无效索引用-1表示。
+        - scores: 形状为(n_q, top_k)的相似度分数矩阵，数据类型为float。包含每个查询向量与最相关的top_k个参考向量的相似度分数，无效分数用-inf表示。
+    - 如果output_mode为'hit':
+        - new_indices: 形状为(num_hitted, 3)的矩阵，每行格式为[qry_index, ref_index, top_k_pos]，数据类型为long。
+        - new_scores: 形状为(num_hitted,)的张量，包含有效命中的相似度分数，数据类型为float。
     - 所有返回结果均按照scores进行排序，从高到低。
     """
     
@@ -249,11 +275,11 @@ def emb_similarity_search(
     
     if query.device.type.startswith("cuda"):
         return emb_similarity_search_cuda(
-            query, ref, operator, top_k, chunk_size, _work_device, _output_device
+            query, ref, operator, top_k, chunk_size, output_mode, _work_device, _output_device
         )
     else:
         return emb_similarity_search_cpu(
-            query, ref, operator, top_k, chunk_size, _work_device, _output_device
+            query, ref, operator, top_k, chunk_size, output_mode, _work_device, _output_device
         )
         
 def emb_similarity_search_by_queue(
@@ -262,6 +288,7 @@ def emb_similarity_search_by_queue(
     sim_operator: EmbbedingSimilarityOperator = CosineOperator,
     top_k: int = None,
     chunk_size: int = 5120,
+    output_mode: Literal['top_k', 'hit'] = 'top_k',
     num_workers: int = 4,
     work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     output_device: Union[str, torch.device, Literal['auto']] = 'auto',
@@ -272,20 +299,27 @@ def emb_similarity_search_by_queue(
     使用队列中的多个查询向量集和参考向量集，计算它们之间的相似度，并返回每个查询向量集与参考向量集之间前top_k个最相关的参考向量的索引和相似度分数。
     
     参数:
-    - query_queue: 查询向量集的列表，每个元素的形状为(n_q, dim)。
-    - ref_queue: 参考向量集的列表，每个元素的形状为(n_r, dim)。
+    - query_queue: 查询向量集的列表，每个查询向量集的形状为(n_q, dim)。
+    - ref_queue: 参考向量集的列表，每个参考向量集的形状为(n_r, dim)。
     - sim_operator: 用于计算相似度的算子，默认为余弦相似度算子(CosineOperator)。
     - top_k: 每个查询向量返回前top_k个最相关的参考向量的索引和相似度。如果不指定，则返回与所有参考向量的相似度。
     - chunk_size: 用于分块处理的大小，以减少内存使用。
+    - output_mode: 返回结果的格式
+        - 'top_k'：返回每个查询向量的top_k个参考向量索引和相似度。
+        - 'hit'：以命中对的形式返回平整的索引和相似度。
     - num_workers: 用于处理任务的线程数，用于并行处理。
     - work_device: 在其上执行计算的设备，默认为'auto'，表示自动推断设备。
     - output_device: 在其上返回结果的设备，默认为'auto'，表示自动推断设备。
     - operator_kwargs: 传递给sim_operator的额外参数，可选。
     
     返回:
-    - results: 一个包含多个元组的列表，每个元组包含indices和scores两个torch.Tensor。
-        - indices是对应于scores的参考向量索引矩阵
-        - scores是查询向量与参考向量之间的相似度分数矩阵。
+    - results: 一个包含多个元组的列表，每个元组对应于query_queue和ref_queue中的一个查询向量集和参考向量集对。
+        - 如果output_mode为'top_k':
+            - indices: 形状为(n_q, top_k)的参考向量索引矩阵，数据类型为long。包含每个查询向量最相关的top_k个参考向量的索引，无效索引用-1表示。
+            - scores: 形状为(n_q, top_k)的相似度分数矩阵，数据类型为float。包含每个查询向量与最相关的top_k个参考向量的相似度分数，无效分数用-inf表示。
+        - 如果output_mode为'hit':
+            - new_indices: 形状为(num_hitted, 3)的矩阵，每行格式为[qry_index, ref_index, top_k_pos]，数据类型为long。
+            - new_scores: 形状为(num_hitted,)的张量，包含有效命中的相似度分数，数据类型为float。
     - 所有返回结果均按照scores进行排序，从高到低。
     """
     
@@ -304,6 +338,7 @@ def emb_similarity_search_by_queue(
             sim_operator=operator,
             top_k=top_k,
             chunk_size=chunk_size,
+            output_mode=output_mode,
             work_device=_work_device,
             output_device=_output_device
         )
@@ -313,6 +348,7 @@ def emb_similarity_search_by_queue(
             sim_operator=operator,  
             top_k=top_k,
             chunk_size=chunk_size,
+            output_mode=output_mode,
             work_device=_work_device,
             output_device=_output_device
         )

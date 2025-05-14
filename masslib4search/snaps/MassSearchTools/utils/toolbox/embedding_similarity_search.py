@@ -34,6 +34,7 @@ class EmbeddingSimilaritySearch(ToolBox):
         - `work_device`: 计算设备（自动推断策略：优先使用输入数据所在设备）
         - `output_device`: 默认与计算设备一致
         - `operator_kwargs`: 相似度计算算子的额外参数
+        - `output_mode`: 返回结果的格式，可选'top_k'或'hit'。默认为'top_k'。
     '''
 
     # 类变量
@@ -93,6 +94,12 @@ class EmbeddingSimilaritySearch(ToolBox):
         title="额外算子参数",
         description="相似度计算算子的额外参数",
     )
+    
+    output_mode: Literal['top_k','hit'] = Field(
+        'top_k',
+        title="结果模式",
+        description="结果返回模式,'top_k'返回top_k个最相似向量的索引和相似度的二维矩阵，'hit'返回所有向量的索引的命中对及相似性",
+    )
 
     def run(
         self,
@@ -102,16 +109,21 @@ class EmbeddingSimilaritySearch(ToolBox):
         '''
         执行嵌入向量相似度搜索（单层结构输入）
 
-        根据类实例的配置参数调用相似度搜索核心逻辑，输入为两个嵌入向量张量
+        根据类实例的配置参数调用相似度搜索核心逻辑，输入为两个嵌入向量张量。
+        如果查询集或参考集为空，则返回适当的空张量。
 
-        Args:
-            query: 查询向量，形状为 (n_q, dim)，类型为 float32
-            ref: 参考向量，形状为 (n_r, dim)，类型为 float32
+        参数:
+            - query: 查询向量集，形状为(n_q, dim)，类型为float32。
+            - ref: 参考向量集，形状为(n_r, dim)，类型为float32。
 
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: 计算得到的相似度矩阵和对应的索引矩阵
-                - indices: 参考向量的索引矩阵，形状为 (n_q, top_k) 或 (n_q, n_r)
-                - scores: 查询向量与参考向量之间的相似度分数矩阵，形状为 (n_q, top_k) 或 (n_q, n_r)
+        返回:
+            - Tuple[torch.Tensor, torch.Tensor]: 计算得到的相似度矩阵和对应的索引矩阵。
+                - 如果output_mode为'top_k':
+                    - indices: 形状为(n_q, top_k)的参考向量索引矩阵，数据类型为long。包含每个查询向量最相关的top_k个参考向量的索引，无效索引用-1表示。
+                    - scores: 形状为(n_q, top_k)的相似度分数矩阵，数据类型为float。包含每个查询向量与最相关的top_k个参考向量的相似度分数，无效分数用-inf表示。
+                - 如果output_mode为'hit':
+                    - new_indices: 形状为(num_hitted, 3)的矩阵，每行格式为[qry_index, ref_index, top_k_pos]，数据类型为long。
+                    - new_scores: 形状为(num_hitted,)的张量，包含有效命中的相似度分数，数据类型为float。
         '''
         return emb_similarity_search(
             query,
@@ -119,6 +131,7 @@ class EmbeddingSimilaritySearch(ToolBox):
             sim_operator=self.sim_operator,
             top_k=self.top_k,
             chunk_size=self.chunk_size,
+            output_mode=self.output_mode,
             work_device=self.work_device,
             output_device=self.output_device,
             operator_kwargs=self.operator_kwargs,
@@ -132,17 +145,21 @@ class EmbeddingSimilaritySearch(ToolBox):
         '''
         执行嵌入向量相似度搜索（嵌套结构输入）
 
-        支持多层级输入结构（如批次数据），自动进行扁平化处理后保持原始数据层级，
-        适用于处理多个样本或实验的批量相似度搜索操作
+        支持多个查询向量集和参考向量集的批量相似度搜索操作。适用于处理多个样本或实验的批量相似度搜索操作。
+        如果查询集或参考集为空，则返回适当的空张量。
 
-        Args:
-            query_queue: 查询向量队列，每个元素形状为 (n_q, dim)，类型为 float32
-            ref_queue: 参考向量队列，每个元素形状为 (n_r, dim)，类型为 float32
+        参数:
+            - query_queue: 查询向量集的列表，每个查询向量集的形状为(n_q, dim)。
+            - ref_queue: 参考向量集的列表，每个参考向量集的形状为(n_r, dim)。
 
-        Returns:
-            List[Tuple[torch.Tensor, torch.Tensor]]: 与输入结构对应的相似度矩阵和索引矩阵列表
-                - indices: 参考向量的索引矩阵，形状为 (n_q, top_k) 或 (n_q, n_r)
-                - scores: 查询向量与参考向量之间的相似度分数矩阵，形状为 (n_q, top_k) 或 (n_q, n_r)
+        返回:
+            - List[Tuple[torch.Tensor, torch.Tensor]]: 一个包含多个元组的列表，每个元组对应于query_queue和ref_queue中的一个查询向量集和参考向量集对。
+                - 如果output_mode为'top_k':
+                    - indices: 形状为(n_q, top_k)的参考向量索引矩阵，数据类型为long。包含每个查询向量最相关的top_k个参考向量的索引，无效索引用-1表示。
+                    - scores: 形状为(n_q, top_k)的相似度分数矩阵，数据类型为float。包含每个查询向量与最相关的top_k个参考向量的相似度分数，无效分数用-inf表示。
+                - 如果output_mode为'hit':
+                    - new_indices: 形状为(num_hitted, 3)的矩阵，每行格式为[qry_index, ref_index, top_k_pos]，数据类型为long。
+                    - new_scores: 形状为(num_hitted,)的张量，包含有效命中的相似度分数，数据类型为float。
         '''
         return emb_similarity_search_by_queue(
             query_queue,
@@ -150,6 +167,7 @@ class EmbeddingSimilaritySearch(ToolBox):
             sim_operator=self.sim_operator,
             top_k=self.top_k,
             chunk_size=self.chunk_size,
+            output_mode=self.output_mode,
             num_workers=self.num_workers,
             work_device=self.work_device,
             output_device=self.output_device,

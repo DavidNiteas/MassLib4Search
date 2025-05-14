@@ -11,7 +11,7 @@ from typing import Optional, Literal, List, Tuple, Union, Sequence, Hashable
 
 class FragmentSearchDatas(PrecursorSearchDatas):
     
-    ref_mzs: pd.DataFrame
+    ref_mzs: pd.DataFrame # pd.DataFrame(index=ref_ids, columns=adducts, dtype=float)
     
     @classmethod
     def from_raw_data(
@@ -140,4 +140,4 @@ class FragmentSearcher(Searcher):
         return raw_results
     
     def run(self, data: FragmentSearchDatas) -> FragmentSearchResults:
-        return super(FragmentSearcher, self).run(data)
+        return super().run(data)

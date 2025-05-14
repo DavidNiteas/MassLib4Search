@@ -12,11 +12,11 @@ from typing import Optional, Literal, List, Tuple, Union, Sequence, Hashable
 
 class PrecursorSearchDatas(SearchDataEntity):
     
-    qry_mzs: pd.Series
-    ref_mzs: pd.Series
-    qry_rts: Optional[pd.Series] = None
-    ref_rts: Optional[pd.Series] = None
-    tag_refs_ids: Optional[pd.Series] = None
+    qry_mzs: pd.Series # pd.Series[float]
+    ref_mzs: pd.Series # pd.Series[float]
+    qry_rts: Optional[pd.Series] = None # pd.Series[float]
+    ref_rts: Optional[pd.Series] = None # pd.Series[float]
+    tag_refs_ids: Optional[pd.Series] = None # pd.Series[pd.Index]
     
     def get_inputs(self):
         if self.tag_refs_ids is None:
@@ -224,4 +224,4 @@ class PrecursorSearcher(Searcher):
         return raw_results
     
     def run(self, data: PrecursorSearchDatas) -> PrecursorSearchResults:
-        return super(PrecursorSearcher, self).run(data)
+        return super().run(data)
