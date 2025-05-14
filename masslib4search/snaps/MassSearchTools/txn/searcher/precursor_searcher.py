@@ -1,6 +1,6 @@
 from __future__ import annotations
 from .ABCs import Searcher, SearchDataEntity, SearchConfigEntity, SearchResultsEntity
-from ...utils.toolbox.ms_peak_search import PeakMZSearch
+from ...utils.toolbox import PeakMZSearch
 from pydantic import Field
 import torch
 import pandas as pd
