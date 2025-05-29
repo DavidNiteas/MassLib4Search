@@ -105,7 +105,10 @@ class PrecursorSearchConfig(SearchConfigEntity):
     chunk_size: int = Field(
         default=5120,
         description="数据分块大小（平衡内存使用与计算效率）",
-        ge=128
+    )
+    num_workers: int = Field(
+        default=4,
+        description="并行计算线程数",
     )
     work_device: Union[str, torch.device, Literal['auto']] = Field(
         default='auto',
@@ -209,6 +212,7 @@ class PrecursorSearcher(Searcher):
         mz_tolerance_type: Literal['ppm', 'Da'] = 'ppm',
         RT_tolerance: float = 0.1,
         chunk_size: int = 5120,
+        num_workers: int= 4,
         work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         peak_searcher = PeakMZSearch(
@@ -217,6 +221,7 @@ class PrecursorSearcher(Searcher):
             RT_tolerance=RT_tolerance,
             adduct_co_occurrence_threshold=1,
             chunk_size=chunk_size,
+            num_workers=num_workers,
             work_device=work_device,
             output_device='cpu'
         )

@@ -416,7 +416,7 @@ def mz_search_by_queue(
         
     elif len(qry_ions_queue) == 1:
         
-        results = mz_search(
+        results = [mz_search(
             qry_ions_queue[0], ref_mzs_queue[0],
             mz_tolerance=mz_tolerance,
             mz_tolerance_type=mz_tolerance_type,
@@ -427,7 +427,7 @@ def mz_search_by_queue(
             chunk_size=chunk_size,
             work_device=_work_device,
             output_device=_output_device
-        )
+        )]
         
     else:
         

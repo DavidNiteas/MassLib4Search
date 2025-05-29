@@ -54,7 +54,10 @@ class PeakMZSearch(ToolBox):
     chunk_size: int = Field(
         default=5120,
         description="数据分块大小（平衡内存使用与计算效率）",
-        ge=128
+    )
+    num_workers: int = Field(
+        default=4,
+        description="并行计算线程数",
     )
     work_device: Union[str, torch.device, Literal['auto']] = Field(
         default='auto',
@@ -130,6 +133,7 @@ class PeakMZSearch(ToolBox):
             RT_tolerance=self.RT_tolerance,
             adduct_co_occurrence_threshold=self.adduct_co_occurrence_threshold,
             chunk_size=self.chunk_size,
+            num_workers = self.num_workers,
             work_device=self.work_device,
             output_device=self.output_device,
         )

@@ -69,7 +69,7 @@ class FragmentSearchResults(PrecursorSearchResults):
             indices, delta = raw_results[0]
             qry_indices = indices[:,0].tolist()
             ref_indices = indices[:,1].tolist()
-            adduct_indices = indices[:,2].tolist()
+            adduct_indices = indices[:,2].tolist() if len(indices) > 0 else []
             qry_ids = data.qry_mzs.index[qry_indices].tolist()
             ref_ids = data.ref_mzs.index[ref_indices].tolist()
             adducts = data.ref_mzs.columns[adduct_indices].tolist()
@@ -125,6 +125,7 @@ class FragmentSearcher(Searcher):
         RT_tolerance: float = 0.1,
         adduct_co_occurrence_threshold: int = 1,
         chunk_size: int = 5120,
+        num_workers: int = 4,
         work_device: Union[str, torch.device, Literal['auto']] = 'auto',
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         peak_searcher = PeakMZSearch(
@@ -133,6 +134,7 @@ class FragmentSearcher(Searcher):
             RT_tolerance=RT_tolerance,
             adduct_co_occurrence_threshold=adduct_co_occurrence_threshold,
             chunk_size=chunk_size,
+            num_workers=num_workers,
             work_device=work_device,
             output_device='cpu'
         )

@@ -312,7 +312,7 @@ def spec_similarity_search(
             output_device=_output_device
         )
     else:
-        return spec_similarity_search_cpu_by_queue(
+        return spec_similarity_search_cpu(
             query, ref, operator,
             top_k=top_k,
             num_dask_workers=num_dask_workers,
