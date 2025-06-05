@@ -190,6 +190,7 @@ class EmbeddingSearchResults(SearchResultsEntity):
             self.results_table
             .groupby('qry_ids', group_keys=False)['ref_ids']
             .apply(pd.Index)
+            .apply(lambda x: x.unique())
         )
     
 class EmbeddingSearcher(Searcher):
